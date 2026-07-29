@@ -16,6 +16,7 @@ const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID || "1348766448197304350";
 
 app.use(cors());
 app.use(express.json());
+app.set('trust proxy', true); // Required for correct IP behind Render proxy
 
 // Initialize JSON database if not exists
 function loadDB() {
@@ -24,7 +25,8 @@ function loadDB() {
             keys: [
                 { code: "ARCANE-TEST-KEY123", durationDays: 30, used: false }
             ],
-            users: []
+            users: [],
+            activationLogs: []
         };
         fs.writeFileSync(DB_FILE, JSON.stringify(initialData, null, 2));
         return initialData;
@@ -33,7 +35,7 @@ function loadDB() {
         const raw = fs.readFileSync(DB_FILE, 'utf-8');
         return JSON.parse(raw);
     } catch (e) {
-        return { keys: [], users: [] };
+        return { keys: [], users: [], activationLogs: [] };
     }
 }
 
@@ -80,6 +82,7 @@ app.post('/api/generatekey', (req, res) => {
 // -------------------------------------------------------------------
 app.post('/api/register', async (req, res) => {
     const { username, password, key, hwid } = req.body;
+    const userIP = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'Unknown';
 
     if (!username || !password || !key) {
         return res.json({ success: false, message: "Username, password, and license key are required!" });
@@ -131,15 +134,38 @@ app.post('/api/register', async (req, res) => {
     };
 
     db.users.push(newUser);
+
+    // --- Activation Log ---
+    if (!db.activationLogs) db.activationLogs = [];
+    const logEntry = {
+        event: 'LICENSE_ACTIVATED',
+        username: username,
+        key: key,
+        ip: userIP,
+        hwid: hwid || 'Not provided',
+        lifetime: isLifetime,
+        expiresAt: isLifetime ? 'LIFETIME' : expiresAt.toISOString(),
+        activatedAt: now.toISOString()
+    };
+    db.activationLogs.push(logEntry);
     saveDB(db);
 
-    console.log(`[REGISTER SUCCESS] User: ${username} | Expires: ${isLifetime ? 'LIFETIME' : expiresAt.toISOString()}`);
+    console.log(`[LICENSE ACTIVATED] User: ${username} | Key: ${key} | IP: ${userIP} | HWID: ${hwid || 'N/A'} | Expires: ${isLifetime ? 'LIFETIME' : expiresAt.toISOString()}`);
     return res.json({
         success: true,
         message: "Account registered successfully!",
         expiresAt: isLifetime ? null : expiresAt.toISOString(),
         lifetime: isLifetime
     });
+});
+
+// -------------------------------------------------------------------
+// API: View Activation Logs
+// -------------------------------------------------------------------
+app.get('/api/logs', (req, res) => {
+    const db = loadDB();
+    const logs = (db.activationLogs || []).slice().reverse(); // newest first
+    return res.json({ success: true, total: logs.length, logs });
 });
 
 // -------------------------------------------------------------------
