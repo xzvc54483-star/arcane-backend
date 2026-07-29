@@ -1,0 +1,16 @@
+{
+  "name": "arcane-backend",
+  "version": "1.0.0",
+  "module": "src/index.ts",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "start": "bun run src/index.ts"
+  },
+  "dependencies": {
+    "@elysiajs/cors": "^1.0.0",
+    "discord.js": "^14.14.1",
+    "elysia": "^1.0.0",
+    "postgres": "^3.4.4"
+  }
+}
