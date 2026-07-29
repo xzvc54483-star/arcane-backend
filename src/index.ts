@@ -626,22 +626,27 @@ if (DISCORD_BOT_TOKEN) {
             // ── /logs ─────────────────────────────────────────────────
             else if (cmd === 'logs') {
                 if (!sql) return interaction.editReply({ content: '❌ Brak połączenia z bazą.' });
-                const logs = await sql`SELECT * FROM activation_logs ORDER BY activated_at DESC LIMIT 10`;
-                const totalResult = await sql`SELECT COUNT(*) as count FROM activation_logs`;
-                const total = totalResult[0].count;
+                try {
+                    const logs = await sql`SELECT * FROM activation_logs ORDER BY activated_at DESC LIMIT 10`;
+                    const totalResult = await sql`SELECT COUNT(*) as count FROM activation_logs`;
+                    const total = totalResult[0]?.count || 0;
 
-                const lines = logs.map((l: any, i: number) =>
-                    `**${i+1}.** \`${l.username}\` • \`${l.ip}\` • HWID: \`${(l.hwid || 'N/A').substring(0,12)}...\` • ${formatDate(l.activated_at)}`
-                );
+                    const lines = logs.map((l: any, i: number) =>
+                        `**${i+1}.** \`${l.username || 'Brak'}\` • \`${l.ip || 'Brak'}\` • HWID: \`${(l.hwid || 'N/A').substring(0,12)}...\` • ${formatDate(l.activated_at)}`
+                    );
 
-                await interaction.editReply({ embeds: [
-                    new EmbedBuilder()
-                        .setTitle('📊 Ostatnie aktywacje licencji')
-                        .setColor(0x2898FA)
-                        .setDescription(lines.length > 0 ? lines.join('\n') : 'Brak logów.')
-                        .setFooter({ text: `Łącznie aktywacji: ${total}` })
-                        .setTimestamp()
-                ]});
+                    await interaction.editReply({ embeds: [
+                        new EmbedBuilder()
+                            .setTitle('📊 Ostatnie aktywacje licencji')
+                            .setColor(0x2898FA)
+                            .setDescription(lines.length > 0 ? lines.join('\n') : 'Brak logów aktywacji w bazie.')
+                            .setFooter({ text: `Łącznie aktywacji: ${total}` })
+                            .setTimestamp()
+                    ]});
+                } catch (dbErr) {
+                    console.error('[DISCORD BOT ERROR /logs]:', dbErr);
+                    await interaction.editReply({ content: '❌ Wystąpił błąd bazy danych podczas pobierania logów. (Sprawdź czy tabela activation_logs istnieje)' });
+                }
             }
 
             // ── /stats ────────────────────────────────────────────────
