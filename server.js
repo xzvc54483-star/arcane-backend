@@ -4,7 +4,7 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const fs = require('fs');
 const path = require('path');
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -273,7 +273,7 @@ function formatDate(iso) {
 if (DISCORD_BOT_TOKEN) {
     const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-    client.once('ready', async () => {
+    client.once('clientReady', async () => {
         console.log(`[DISCORD BOT] Logged in as ${client.user.tag}`);
 
         if (DISCORD_CLIENT_ID) {
@@ -348,10 +348,10 @@ if (DISCORD_BOT_TOKEN) {
 
         // All commands require admin role
         if (!isAdmin(interaction)) {
-            return interaction.reply({ content: '❌ **Brak uprawnień!** Ta komenda jest tylko dla adminów.', ephemeral: true });
+            return interaction.reply({ content: '❌ **Brak uprawnień!** Ta komenda jest tylko dla adminów.', flags: MessageFlags.Ephemeral });
         }
 
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
         try {
             const db = loadDB();
@@ -590,6 +590,7 @@ if (DISCORD_BOT_TOKEN) {
         }
     });
 
+    client.on('error', err => console.error('[DISCORD BOT] Client error:', err));
     client.login(DISCORD_BOT_TOKEN).catch(err => console.error('[DISCORD BOT] Login failed:', err));
 } else {
     console.log('[DISCORD BOT] DISCORD_BOT_TOKEN not provided. Bot startup skipped.');
