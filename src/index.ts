@@ -1,7 +1,7 @@
 import { Elysia } from 'elysia';
 import { cors } from '@elysiajs/cors';
 import postgres from 'postgres';
-import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder } from 'discord.js';
+import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, MessageFlags } from 'discord.js';
 
 const PORT = process.env.PORT || 3000;
 const DATABASE_URL = process.env.DATABASE_URL || "";
@@ -361,7 +361,7 @@ console.log(`🚀 ElysiaJS + Bun Secure Auth Backend running on port ${PORT}`);
 if (DISCORD_BOT_TOKEN) {
     const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-    client.once('ready', async () => {
+    client.once('clientReady', async () => {
         console.log(`[DISCORD BOT] Logged in as ${client.user?.tag}`);
 
         if (DISCORD_CLIENT_ID) {
@@ -427,10 +427,10 @@ if (DISCORD_BOT_TOKEN) {
         const cmd = interaction.commandName;
 
         if (!isAdmin(interaction)) {
-            return interaction.reply({ content: '❌ **Brak uprawnień!** Ta komenda jest tylko dla adminów.', ephemeral: true });
+            return interaction.reply({ content: '❌ **Brak uprawnień!** Ta komenda jest tylko dla adminów.', flags: MessageFlags.Ephemeral });
         }
 
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
         try {
             // ── /generatekey ──────────────────────────────────────────
@@ -685,5 +685,6 @@ if (DISCORD_BOT_TOKEN) {
         }
     });
 
+    client.on('error', (err: any) => console.error('[DISCORD BOT] Client error:', err));
     client.login(DISCORD_BOT_TOKEN).catch((err: any) => console.error('[DISCORD BOT] Login failed:', err));
 }
