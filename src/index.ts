@@ -10,7 +10,7 @@ const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || "";
 const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID || "1348766448197304350";
 
 // Initialize external PostgreSQL client
-const sql = DATABASE_URL ? postgres(DATABASE_URL, { ssl: DATABASE_URL.includes('dpg-') ? false : 'require' }) : null;
+const sql = DATABASE_URL ? postgres(DATABASE_URL, { ssl: DATABASE_URL.includes('.render.com') ? 'require' : false }) : null;
 
 // Rate-limiting / Brute-force protection memory store
 interface FailedAttempt {
