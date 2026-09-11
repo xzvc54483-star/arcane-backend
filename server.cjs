@@ -43,88 +43,85 @@ function saveDB(db) {
 // SQLite Table Initialization
 // -------------------------------------------------------------------
 function initDatabase() {
-    sql.exec(`
-        CREATE TABLE IF NOT EXISTS keys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            code TEXT UNIQUE NOT NULL,
-            durationDays INTEGER NOT NULL DEFAULT 30,
-            used INTEGER DEFAULT 0,
-            usedBy TEXT,
-            usedAt TEXT,
-            createdAt TEXT NOT NULL,
-            createdBy TEXT
-        )
-    `);
-    sql.exec(`
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            hwid TEXT DEFAULT '',
-            subExpiresAt TEXT,
-            lifetime INTEGER DEFAULT 0,
-            registeredAt TEXT NOT NULL
-        )
-    `);
-    sql.exec(`
-        CREATE TABLE IF NOT EXISTS activation_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event TEXT NOT NULL,
-            username TEXT NOT NULL,
-            key TEXT,
-            ip TEXT,
-            hwid TEXT,
-            lifetime INTEGER DEFAULT 0,
-            expiresAt TEXT,
-            activatedAt TEXT NOT NULL
-        )
-    `);
-    sql.exec(`
-        CREATE TABLE IF NOT EXISTS launchers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            buildId TEXT UNIQUE NOT NULL,
-            name TEXT,
-            compiledAt TEXT NOT NULL,
-            status TEXT DEFAULT 'active',
-            downloadCount INTEGER DEFAULT 0,
-            activeSessions TEXT DEFAULT '[]'
-        )
-    `);
+    try {
+        console.log('[DB] Initializing SQLite tables...');
+        sql.exec(`
+            CREATE TABLE IF NOT EXISTS keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT UNIQUE NOT NULL,
+                durationDays INTEGER NOT NULL DEFAULT 30,
+                used INTEGER DEFAULT 0,
+                usedBy TEXT,
+                usedAt TEXT,
+                createdAt TEXT NOT NULL,
+                createdBy TEXT
+            )
+        `);
+        sql.exec(`
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                hwid TEXT DEFAULT '',
+                subExpiresAt TEXT,
+                lifetime INTEGER DEFAULT 0,
+                registeredAt TEXT NOT NULL
+            )
+        `);
+        sql.exec(`
+            CREATE TABLE IF NOT EXISTS activation_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event TEXT NOT NULL,
+                username TEXT NOT NULL,
+                key TEXT,
+                ip TEXT,
+                hwid TEXT,
+                lifetime INTEGER DEFAULT 0,
+                expiresAt TEXT,
+                activatedAt TEXT NOT NULL
+            )
+        `);
+        sql.exec(`
+            CREATE TABLE IF NOT EXISTS launchers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                buildId TEXT UNIQUE NOT NULL,
+                name TEXT,
+                compiledAt TEXT NOT NULL,
+                status TEXT DEFAULT 'active',
+                downloadCount INTEGER DEFAULT 0,
+                activeSessions TEXT DEFAULT '[]'
+            )
+        `);
+        console.log('[DB] All tables created.');
 
-    // Migrate from db.json to SQLite if tables are empty
-    const keyCount = sql.prepare('SELECT COUNT(*) as count FROM keys').get().count;
-    if (keyCount === 0) {
-        const jsonDb = loadDB();
-        const insertKey = sql.prepare('INSERT INTO keys (code, durationDays, used, usedBy, usedAt, createdAt, createdBy) VALUES (?, ?, ?, ?, ?, ?, ?)');
-        const insertUser = sql.prepare('INSERT INTO users (id, username, password, hwid, subExpiresAt, lifetime, registeredAt) VALUES (?, ?, ?, ?, ?, ?, ?)');
-        const insertLog = sql.prepare('INSERT INTO activation_logs (event, username, key, ip, hwid, lifetime, expiresAt, activatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-        const insertLauncher = sql.prepare('INSERT INTO launchers (buildId, name, compiledAt, status, downloadCount, activeSessions) VALUES (?, ?, ?, ?, ?, ?)');
-
-        const insertKeyTx = sql.transaction((keys) => {
-            for (const k of keys) {
-                insertKey.run(k.code, k.durationDays, k.used ? 1 : 0, k.usedBy || null, k.usedAt || null, k.createdAt || null, k.createdBy || null);
+        // Check and migrate from db.json if tables are empty
+        const keyCount = sql.prepare('SELECT COUNT(*) as count FROM keys').get().count;
+        console.log('[DB] Keys table count:', keyCount);
+        if (keyCount === 0) {
+            const jsonDbPath = path.join(__dirname, 'db.json');
+            console.log('[DB] db.json exists:', fs.existsSync(jsonDbPath));
+            if (fs.existsSync(jsonDbPath)) {
+                const jsonData = JSON.parse(fs.readFileSync(jsonDbPath, 'utf-8'));
+                console.log('[DB] db.json loaded:', Object.keys(jsonData).length, 'tables');
+                const insertKey = sql.prepare('INSERT INTO keys (code, durationDays, used, usedBy, usedAt, createdAt, createdBy) VALUES (?, ?, ?, ?, ?, ?, ?)');
+                const insertUser = sql.prepare('INSERT INTO users (id, username, password, hwid, subExpiresAt, lifetime, registeredAt) VALUES (?, ?, ?, ?, ?, ?, ?)');
+                const insertLog = sql.prepare('INSERT INTO activation_logs (event, username, key, ip, hwid, lifetime, expiresAt, activatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+                const insertLauncher = sql.prepare('INSERT INTO launchers (buildId, name, compiledAt, status, downloadCount, activeSessions) VALUES (?, ?, ?, ?, ?, ?)');
+                const insertKeyTx = sql.transaction((keys) => { for (const k of keys) insertKey.run(k.code, k.durationDays, k.used ? 1 : 0, k.usedBy || null, k.usedAt || null, k.createdAt || null, k.createdBy || null); });
+                const insertUserTx = sql.transaction((users) => { for (const u of users) insertUser.run(u.id, u.username, u.password, u.hwid || '', u.subExpiresAt || null, u.lifetime ? 1 : 0, u.registeredAt || null); });
+                const insertLogTx = sql.transaction((logs) => { for (const l of logs) insertLog.run(l.event, l.username, l.key || null, l.ip || null, l.hwid || null, l.lifetime ? 1 : 0, l.expiresAt || null, l.activatedAt || null); });
+                const insertLauncherTx = sql.transaction((launchers) => { for (const l of launchers) insertLauncher.run(l.buildId, l.name || null, l.compiledAt || null, l.status || 'active', l.downloadCount || 0, JSON.stringify(l.activeSessions || [])); });
+                insertKeyTx(jsonData.keys || []);
+                insertUserTx(jsonData.users || []);
+                insertLogTx(jsonData.activationLogs || []);
+                insertLauncherTx(jsonData.launchers || []);
+                console.log('[DB] Migration from db.json complete.');
             }
-        });
-        const insertUserTx = sql.transaction((users) => {
-            for (const u of users) {
-                insertUser.run(u.id, u.username, u.password, u.hwid || '', u.subExpiresAt || null, u.lifetime ? 1 : 0, u.registeredAt || null);
-            }
-        });
-        const insertLogTx = sql.transaction((logs) => {
-            for (const l of logs) {
-                insertLog.run(l.event, l.username, l.key || null, l.ip || null, l.hwid || null, l.lifetime ? 1 : 0, l.expiresAt || null, l.activatedAt || null);
-            }
-        });
-        const insertLauncherTx = sql.transaction((launchers) => {
-            for (const l of launchers) {
-                insertLauncher.run(l.buildId, l.name || null, l.compiledAt || null, l.status || 'active', l.downloadCount || 0, JSON.stringify(l.activeSessions || []));
-            }
-        });
-
-        insertKeyTx(jsonDb.keys || []);
-        insertUserTx(jsonDb.users || []);
-        insertLogTx(jsonDb.activationLogs || []);
-        insertLauncherTx(jsonDb.launchers || []);
+        }
+        console.log('[DB] Initialization done.');
+    } catch (err) {
+        console.error('[DB] initDatabase error:', err.message);
+        throw err;
     }
 }
 
