@@ -4,11 +4,15 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const fs = require('fs');
 const path = require('path');
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
+const postgres = require('postgres');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DB_FILE = path.join(__dirname, 'db.json');
+
+const DATABASE_URL = process.env.DATABASE_URL || "";
+const sql = DATABASE_URL ? postgres(DATABASE_URL, { ssl: DATABASE_URL.includes('.render.com') ? 'require' : false }) : null;
 
 // Discord Bot Configuration (Set DISCORD_BOT_TOKEN and DISCORD_CLIENT_ID in Render environment variables)
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || "";
@@ -21,23 +25,27 @@ app.set('trust proxy', true); // Required for correct IP behind Render proxy
 
 // Initialize JSON database if not exists
 function loadDB() {
+    let data;
     if (!fs.existsSync(DB_FILE)) {
-        const initialData = {
+        data = {
             keys: [
                 { code: "ARCANE-TEST-KEY123", durationDays: 30, used: false }
             ],
             users: [],
-            activationLogs: []
+            activationLogs: [],
+            launchers: []
         };
-        fs.writeFileSync(DB_FILE, JSON.stringify(initialData, null, 2));
-        return initialData;
+        fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+        return data;
     }
     try {
         const raw = fs.readFileSync(DB_FILE, 'utf-8');
-        return JSON.parse(raw);
+        data = JSON.parse(raw);
     } catch (e) {
-        return { keys: [], users: [], activationLogs: [] };
+        data = { keys: [], users: [], activationLogs: [], launchers: [] };
     }
+    if (!data.launchers) data.launchers = [];
+    return data;
 }
 
 function saveDB(db) {
@@ -253,6 +261,83 @@ app.post('/api/login', async (req, res) => {
 });
 
 // -------------------------------------------------------------------
+// API: Launcher Check Status (Heartbeat / Startup Check)
+// -------------------------------------------------------------------
+app.post('/api/launcher/check-status', (req, res) => {
+    const { buildId, hwid } = req.body;
+    if (!buildId) {
+        return res.json({ success: false, destruct: false, message: "buildId is required" });
+    }
+
+    const db = loadDB();
+    if (!db.launchers) db.launchers = [];
+
+    let launcher = db.launchers.find(l => l.buildId.toLowerCase() === buildId.toLowerCase());
+
+    if (!launcher) {
+        // Auto-register build on check-in if not existing
+        launcher = {
+            buildId: buildId,
+            name: `Arcane Launcher ${buildId}`,
+            compiledAt: new Date().toISOString(),
+            status: "active",
+            downloadCount: 1,
+            activeSessions: hwid ? [hwid] : []
+        };
+        db.launchers.push(launcher);
+    } else {
+        if (hwid) {
+            if (!launcher.activeSessions) launcher.activeSessions = [];
+            if (!launcher.activeSessions.includes(hwid)) {
+                launcher.activeSessions.push(hwid);
+            }
+            launcher.downloadCount = Math.max(launcher.downloadCount || 0, launcher.activeSessions.length);
+        }
+    }
+
+    saveDB(db);
+
+    const isDestructed = launcher.status === "destructed";
+    return res.json({
+        success: true,
+        buildId: launcher.buildId,
+        status: launcher.status,
+        destruct: isDestructed,
+        message: isDestructed ? "Launcher build has been remotely destructed!" : "Build active"
+    });
+});
+
+// -------------------------------------------------------------------
+// API: Register Compiled Launcher Build
+// -------------------------------------------------------------------
+app.post('/api/launcher/register', (req, res) => {
+    const { buildId, name } = req.body;
+    if (!buildId) return res.json({ success: false, message: "buildId is required" });
+
+    const db = loadDB();
+    if (!db.launchers) db.launchers = [];
+
+    const existingIndex = db.launchers.findIndex(l => l.buildId.toLowerCase() === buildId.toLowerCase());
+
+    if (existingIndex !== -1) {
+        db.launchers[existingIndex].name = name || db.launchers[existingIndex].name;
+        db.launchers[existingIndex].status = "active";
+    } else {
+        db.launchers.push({
+            buildId: buildId,
+            name: name || `Arcane Launcher ${buildId}`,
+            compiledAt: new Date().toISOString(),
+            status: "active",
+            downloadCount: 0,
+            activeSessions: []
+        });
+    }
+
+    saveDB(db);
+    return res.json({ success: true, message: `Launcher ${buildId} registered successfully.` });
+});
+
+// -------------------------------------------------------------------
 // Discord Bot Setup — All Admin Slash Commands
 // -------------------------------------------------------------------
 
@@ -329,6 +414,29 @@ if (DISCORD_BOT_TOKEN) {
                     .setName('stats')
                     .setDescription('📈 Statystyki systemu Arcane'),
 
+                // /launchers
+                new SlashCommandBuilder()
+                    .setName('launchers')
+                    .setDescription('🚀 Pokazuje listę skompilowanych launcherów oraz opcję destruct'),
+
+                // /destructlauncher
+                new SlashCommandBuilder()
+                    .setName('destructlauncher')
+                    .setDescription('💣 Zdalne zniszczenie launchera na wszystkich komputerach')
+                    .addStringOption(o => o.setName('buildid').setDescription('ID wersji launchera (np. v1.0.0)').setRequired(true)),
+
+                // /addlauncher
+                new SlashCommandBuilder()
+                    .setName('addlauncher')
+                    .setDescription('➕ Dodaje skompilowany launcher do bazy bota')
+                    .addStringOption(o => o.setName('buildid').setDescription('ID wersji (np. v1.0.0)').setRequired(true))
+                    .addStringOption(o => o.setName('name').setDescription('Opis/Nazwa launchera').setRequired(false)),
+
+                // /users
+                new SlashCommandBuilder()
+                    .setName('users')
+                    .setDescription('👥 Lista wszystkich użytkowników z bazy danych'),
+
             ].map(cmd => cmd.toJSON());
 
             const rest = new REST({ version: '10' }).setToken(DISCORD_BOT_TOKEN);
@@ -342,6 +450,30 @@ if (DISCORD_BOT_TOKEN) {
     });
 
     client.on('interactionCreate', async interaction => {
+        if (interaction.isButton()) {
+            if (!isAdmin(interaction)) {
+                return interaction.reply({ content: '❌ **Brak uprawnień!** Ta komenda jest tylko dla adminów.', flags: MessageFlags.Ephemeral });
+            }
+            if (interaction.customId.startsWith('destruct_build_')) {
+                await interaction.deferUpdate();
+                const targetBuildId = interaction.customId.replace('destruct_build_', '');
+                const db = loadDB();
+                const launcherIndex = db.launchers.findIndex(l => l.buildId.toLowerCase() === targetBuildId.toLowerCase());
+                if (launcherIndex !== -1) {
+                    db.launchers[launcherIndex].status = 'destructed';
+                    saveDB(db);
+                    console.log(`[LAUNCHER DESTRUCTED] Build: ${targetBuildId} | By: ${interaction.user.tag}`);
+                    await interaction.followUp({
+                        content: `💣 **SYGNAŁ DESTRUCT WYSŁANY!**\nLauncher o Build ID \`${targetBuildId}\` został zdestruowany. Wszystkie pobrane instancje u użytkowników ulegną samozniszczeniu przy następnym połączeniu.`,
+                        flags: MessageFlags.Ephemeral
+                    });
+                } else {
+                    await interaction.followUp({ content: `❌ Nie znaleziono launchera o ID \`${targetBuildId}\`.`, flags: MessageFlags.Ephemeral });
+                }
+            }
+            return;
+        }
+
         if (!interaction.isChatInputCommand()) return;
 
         const cmd = interaction.commandName;
@@ -582,6 +714,184 @@ if (DISCORD_BOT_TOKEN) {
                         .setFooter({ text: 'Arcane Auth System' })
                         .setTimestamp()
                 ]});
+            }
+
+            // ── /launchers ─────────────────────────────────────────
+            else if (cmd === 'launchers') {
+                const launchers = db.launchers || [];
+                if (launchers.length === 0) {
+                    return interaction.editReply({ content: 'ℹ️ **Brak skompilowanych launcherów w bazie.** Użyj `/addlauncher` lub uruchom launcher aby go zarejestrować.' });
+                }
+
+                const embed = new EmbedBuilder()
+                    .setTitle('🚀 Skompilowane Launchery Arcane')
+                    .setColor(0x7B68EE)
+                    .setFooter({ text: 'Arcane Auth System • Zdalny Self-Destruct' })
+                    .setTimestamp();
+
+                const row = new ActionRowBuilder();
+
+                launchers.forEach(l => {
+                    const statusText = l.status === 'destructed' ? '💣 **ZDESTRUOWANY**' : '🟢 **AKTYWNY**';
+                    const connectedPcCount = l.downloadCount || (l.activeSessions ? l.activeSessions.length : 0);
+                    embed.addFields({
+                        name: `📦 ${l.name} (\`${l.buildId}\`)`,
+                        value: `Status: ${statusText}\n💻 Pobrane / Aktywne komputery: **${connectedPcCount}**\n📅 Data: ${formatDate(l.compiledAt)}`,
+                        inline: false
+                    });
+
+                    if (l.status !== 'destructed' && row.components.length < 5) {
+                        row.addComponents(
+                            new ButtonBuilder()
+                                .setCustomId(`destruct_build_${l.buildId}`)
+                                .setLabel(`💣 Destruct ${l.buildId}`)
+                                .setStyle(ButtonStyle.Danger)
+                        );
+                    }
+                });
+
+                const replyPayload = { embeds: [embed] };
+                if (row.components.length > 0) {
+                    replyPayload.components = [row];
+                }
+
+                await interaction.editReply(replyPayload);
+            }
+
+            // ── /destructlauncher ─────────────────────────────────
+            else if (cmd === 'destructlauncher') {
+                const buildId = interaction.options.getString('buildid');
+                const launcherIndex = db.launchers.findIndex(l => l.buildId.toLowerCase() === buildId.toLowerCase());
+
+                if (launcherIndex === -1) {
+                    return interaction.editReply({ content: `❌ Nie znaleziono launchera o ID \`${buildId}\`.` });
+                }
+
+                db.launchers[launcherIndex].status = 'destructed';
+                saveDB(db);
+                console.log(`[LAUNCHER DESTRUCTED] Build: ${buildId} | By: ${interaction.user.tag}`);
+
+                await interaction.editReply({ embeds: [
+                    new EmbedBuilder()
+                        .setTitle('💣 LAUNCHER ZDESTRUOWANY')
+                        .setColor(0xFF0000)
+                        .addFields(
+                            { name: '📦 Build ID', value: `\`${buildId}\``, inline: true },
+                            { name: '👤 Przez', value: interaction.user.tag, inline: true },
+                            { name: '⚠️ Wynik', value: 'Wszystkie połączone i pobrane launchery na komputerach graczy zostaną automatycznie usunięte i zdestruowane!', inline: false }
+                        )
+                        .setFooter({ text: 'Arcane Remote Destruct Protocol' })
+                        .setTimestamp()
+                ]});
+            }
+
+            // ── /addlauncher ──────────────────────────────────────
+            else if (cmd === 'addlauncher') {
+                const buildId = interaction.options.getString('buildid');
+                const name = interaction.options.getString('name') || `Arcane Launcher ${buildId}`;
+
+                const existingIndex = db.launchers.findIndex(l => l.buildId.toLowerCase() === buildId.toLowerCase());
+                if (existingIndex !== -1) {
+                    db.launchers[existingIndex].name = name;
+                    db.launchers[existingIndex].status = 'active';
+                } else {
+                    db.launchers.push({
+                        buildId: buildId,
+                        name: name,
+                        compiledAt: new Date().toISOString(),
+                        status: 'active',
+                        downloadCount: 0,
+                        activeSessions: []
+                    });
+                }
+
+                saveDB(db);
+                console.log(`[LAUNCHER REGISTERED] Build: ${buildId} | Name: ${name} | By: ${interaction.user.tag}`);
+
+                await interaction.editReply({ embeds: [
+                    new EmbedBuilder()
+                        .setTitle('✅ Launcher Zarejestrowany')
+                        .setColor(0x00FF7F)
+                        .addFields(
+                            { name: '📦 Build ID', value: `\`${buildId}\``, inline: true },
+                            { name: '📝 Nazwa', value: name, inline: true },
+                            { name: '🟢 Status', value: 'AKTYWNY', inline: true }
+                        )
+                        .setFooter({ text: 'Arcane Launcher Management' })
+                        .setTimestamp()
+                ]});
+            }
+
+            // ── /users ─────────────────────────────────────────────
+            else if (cmd === 'users') {
+                let users = [];
+                let logs = [];
+                if (sql) {
+                    try {
+                        users = await sql`SELECT * FROM users ORDER BY id ASC`;
+                        logs = await sql`SELECT * FROM activation_logs`;
+                    } catch (e) {
+                        console.error('[DB ERROR /users]:', e);
+                        users = db.users || [];
+                        logs = db.activationLogs || [];
+                    }
+                } else {
+                    users = db.users || [];
+                    logs = db.activationLogs || [];
+                }
+
+                if (users.length === 0) {
+                    return interaction.editReply({ content: 'ℹ️ **Brak użytkowników w bazie danych.**' });
+                }
+
+                const now = new Date();
+                const embeds = [];
+                let currentEmbed = new EmbedBuilder()
+                    .setTitle(`👥 Pełna Lista Użytkowników Arcane (${users.length})`)
+                    .setColor(0x2898FA)
+                    .setFooter({ text: 'Arcane Auth System • Pełne Dane Bazy' })
+                    .setTimestamp();
+
+                users.forEach((u, i) => {
+                    if (currentEmbed.data.fields && currentEmbed.data.fields.length >= 25) {
+                        embeds.push(currentEmbed);
+                        currentEmbed = new EmbedBuilder()
+                            .setTitle(`👥 Pełna Lista Użytkowników (cd.)`)
+                            .setColor(0x2898FA)
+                            .setFooter({ text: 'Arcane Auth System' })
+                            .setTimestamp();
+                    }
+
+                    const isLt = u.lifetime;
+                    const expiry = u.sub_expires_at || u.subExpiresAt;
+                    const regAt = u.registered_at || u.registeredAt;
+                    
+                    let statusText;
+                    if (isLt) {
+                        statusText = '♾️ LIFETIME';
+                    } else if (!expiry || now > new Date(expiry)) {
+                        statusText = '🔴 WYGASŁA';
+                    } else {
+                        const diff = new Date(expiry).getTime() - now.getTime();
+                        const daysLeft = Math.floor(diff / (1000 * 60 * 60 * 24));
+                        statusText = `🟢 AKTYWNA (${daysLeft} dni)`;
+                    }
+
+                    const actLog = logs.find(l => l.username && l.username.toLowerCase() === u.username.toLowerCase());
+                    const ipText = actLog?.ip || 'Brak danych';
+                    const hwidText = u.hwid ? `\`${u.hwid}\`` : '`Brak HWID`';
+                    const expText = isLt ? '`♾️ LIFETIME`' : `\`${formatDate(expiry)}\``;
+                    const regText = `\`${formatDate(regAt)}\``;
+
+                    currentEmbed.addFields({
+                        name: `#${u.id || i+1} 👤 ${u.username}`,
+                        value: `📊 Status: ${statusText}\n🖥️ HWID: ${hwidText}\n🌐 IP: \`${ipText}\` \n📅 Rejestracja: ${regText}\n⏰ Wygaśnięcie: ${expText}`,
+                        inline: false
+                    });
+                });
+                embeds.push(currentEmbed);
+
+                await interaction.editReply({ embeds });
             }
 
         } catch (err) {

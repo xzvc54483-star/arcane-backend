@@ -1,4 +1,6 @@
 .env
 node_modules/
 package-lock.json
-db.json
+arcane.db
+arcane.db-shm
+arcane.db-wal

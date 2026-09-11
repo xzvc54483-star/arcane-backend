@@ -1,0 +1,210 @@
+{
+  "keys": [
+    {
+      "code": "ARCANE-TEST-KEY123",
+      "durationDays": 30,
+      "used": false,
+      "usedBy": null,
+      "usedAt": null,
+      "createdAt": "2026-07-26T17:50:52.749Z",
+      "createdBy": null
+    },
+    {
+      "code": "ARCANE-C4Z2-59ZO-VB3K",
+      "durationDays": 30,
+      "used": false,
+      "usedBy": null,
+      "usedAt": null,
+      "createdAt": "2026-07-28T21:45:03.616Z",
+      "createdBy": "xxxxzvc_"
+    },
+    {
+      "code": "ARCANE-2W0V-MG25-FCMG",
+      "durationDays": 1,
+      "used": false,
+      "usedBy": null,
+      "usedAt": null,
+      "createdAt": "2026-07-28T21:45:15.527Z",
+      "createdBy": "xxxxzvc_"
+    },
+    {
+      "code": "ARCANE-49UR-TL52-35Q9",
+      "durationDays": 30,
+      "used": false,
+      "usedBy": null,
+      "usedAt": null,
+      "createdAt": "2026-07-28T21:48:18.868Z",
+      "createdBy": "xxxxzvc_"
+    },
+    {
+      "code": "ARCANE-0MHE-YPP0-9KLQ",
+      "durationDays": 30,
+      "used": true,
+      "usedBy": "szymek",
+      "usedAt": "2026-07-28T21:53:30.032Z",
+      "createdAt": "2026-07-28T21:48:41.561Z",
+      "createdBy": "xxxxzvc_"
+    },
+    {
+      "code": "ARCANE-ZUHV-NA4Q-7JL3",
+      "durationDays": 30,
+      "used": true,
+      "usedBy": "xzvc",
+      "usedAt": "2026-07-28T21:49:46.542Z",
+      "createdAt": "2026-07-28T21:49:37.237Z",
+      "createdBy": "xxxxzvc_"
+    },
+    {
+      "code": "ARCANE-GQ9B-K7H3-WAP3",
+      "durationDays": 30,
+      "used": true,
+      "usedBy": "Wiaderko",
+      "usedAt": "2026-07-29T16:29:31.275Z",
+      "createdAt": "2026-07-29T15:48:01.409Z",
+      "createdBy": "xxxxzvc_"
+    },
+    {
+      "code": "ARCANE-AMWV-HY6E-LLTK",
+      "durationDays": 30,
+      "used": false,
+      "usedBy": null,
+      "usedAt": null,
+      "createdAt": "2026-07-29T20:16:44.211Z",
+      "createdBy": "xxxxzvc_"
+    },
+    {
+      "code": "ARCANE-3Q9B-52DL-FPOL",
+      "durationDays": 50,
+      "used": false,
+      "usedBy": null,
+      "usedAt": null,
+      "createdAt": "2026-07-29T20:16:56.851Z",
+      "createdBy": "xxxxzvc_"
+    },
+    {
+      "code": "ARCANE-T7DX-WJDP-O2Q1",
+      "durationDays": 999,
+      "used": true,
+      "usedBy": "sione",
+      "usedAt": "2026-07-29T20:48:05.207Z",
+      "createdAt": "2026-07-29T20:17:08.449Z",
+      "createdBy": "xxxxzvc_"
+    },
+    {
+      "code": "ARCANE-VF79-9SKQ-SV68",
+      "durationDays": 30,
+      "used": true,
+      "usedBy": "ninjastoppedgg",
+      "usedAt": "2026-07-29T21:37:17.821Z",
+      "createdAt": "2026-07-29T21:36:09.293Z",
+      "createdBy": "xxxxzvc_"
+    },
+    {
+      "code": "ARCANE-5JQA-3I7U-3FBQ",
+      "durationDays": 30,
+      "used": true,
+      "usedBy": "zonix",
+      "usedAt": "2026-07-31T12:14:49.406Z",
+      "createdAt": "2026-07-31T12:14:34.056Z",
+      "createdBy": "xxxxzvc_"
+    }
+  ],
+  "users": [
+    {
+      "id": 1,
+      "username": "xzvc",
+      "password": "$argon2id$v=19$m=65536,t=3,p=1$3MReCylbYDMjZgnl4S2JFehUiqsbO7aZ1fbgZTu8hL0$rtyTZ94wChDbeYuOEQYHKXyMRZgtnl0i//6Jb3pRm78",
+      "hwid": "HWID-CC54EC12",
+      "subExpiresAt": "2026-08-27T21:49:46.547Z",
+      "lifetime": false,
+      "registeredAt": "2026-07-28T21:49:47.571Z"
+    },
+    {
+      "id": 2,
+      "username": "szymek",
+      "password": "$argon2id$v=19$m=65536,t=3,p=1$Nnp6ePzqmazhwHNVqi45YAEB+rJps4LeTQegRej6UGg$AVVJE7PzUIp9kMFmNm0Vbx/3j8oPUsiUJT2dFGV/9Q8",
+      "hwid": "HWID-CC54EC12",
+      "subExpiresAt": "2026-08-27T21:53:30.037Z",
+      "lifetime": false,
+      "registeredAt": "2026-07-28T21:53:31.161Z"
+    },
+    {
+      "id": 3,
+      "username": "Wiaderko",
+      "password": "$argon2id$v=19$m=65536,t=3,p=1$mWNOXtv6j/ot7fddyYAYxEG6wwKfrVPVO3rwyUDleFM$AOStIvNiJvKBD7C5YKkuCkhbgDL2Hbg4RTONjOWI6XE",
+      "hwid": "HWID-5E74B341",
+      "subExpiresAt": "2026-08-28T16:29:31.280Z",
+      "lifetime": false,
+      "registeredAt": "2026-07-29T16:29:32.567Z"
+    },
+    {
+      "id": 4,
+      "username": "sione",
+      "password": "$argon2id$v=19$m=65536,t=3,p=1$1BLpQejrCiq7shaQMYFgTB1NoCPOLZGuPzbs1DEzusQ$baI80oTSVgc7DAyXCJJhlTm1jq/RG+wt01dR0QxD16o",
+      "hwid": "HWID-6C6F4077",
+      "subExpiresAt": "2029-04-23T20:48:05.208Z",
+      "lifetime": false,
+      "registeredAt": "2026-07-29T20:48:06.804Z"
+    },
+    {
+      "id": 5,
+      "username": "ninjastoppedgg",
+      "password": "$argon2id$v=19$m=65536,t=3,p=1$CyszTtNAKfPPiWcVZJboi94CTx30BnjVdBfkCsThjbM$3HmCJRuuq8Q4AuseckH5XNWP0W1gcBHkMxsfg1fOhoM",
+      "hwid": "HWID-5E74B341",
+      "subExpiresAt": "2026-08-28T21:37:17.822Z",
+      "lifetime": false,
+      "registeredAt": "2026-07-29T21:37:18.997Z"
+    },
+    {
+      "id": 6,
+      "username": "zonix",
+      "password": "$argon2id$v=19$m=65536,t=3,p=1$m1akkijd/4oZ3yRKdsbnUuI93qUhddpAWSaXQjOCqsA$mAOMxd3E4yK1spZTd3ypccSDpHkxIpP2Pq+BP9Y7Vm8",
+      "hwid": "HWID-5AA36EE0",
+      "subExpiresAt": "2026-08-30T12:14:49.409Z",
+      "lifetime": false,
+      "registeredAt": "2026-07-31T12:14:50.702Z"
+    }
+  ],
+  "activationLogs": [
+    {
+      "event": "LICENSE_ACTIVATED",
+      "username": "sione",
+      "key": "ARCANE-T7DX-WJDP-O2Q1",
+      "ip": "109.231.7.191",
+      "hwid": "HWID-6C6F4077",
+      "lifetime": false,
+      "expiresAt": "2029-04-23T22:48:05.208Z",
+      "activatedAt": "2026-07-29T20:48:06.807Z"
+    },
+    {
+      "event": "LICENSE_ACTIVATED",
+      "username": "ninjastoppedgg",
+      "key": "ARCANE-VF79-9SKQ-SV68",
+      "ip": "46.134.55.23",
+      "hwid": "HWID-5E74B341",
+      "lifetime": false,
+      "expiresAt": "2026-08-28T23:37:17.822Z",
+      "activatedAt": "2026-07-29T21:37:19.000Z"
+    },
+    {
+      "event": "LICENSE_ACTIVATED",
+      "username": "zonix",
+      "key": "ARCANE-5JQA-3I7U-3FBQ",
+      "ip": "31.175.12.28",
+      "hwid": "HWID-5AA36EE0",
+      "lifetime": false,
+      "expiresAt": "2026-08-30T14:14:49.409Z",
+      "activatedAt": "2026-07-31T12:14:50.706Z"
+    }
+  ],
+  "launchers": [
+    {
+      "buildId": "v1.0.0",
+      "name": "Arcane Launcher v1.0.0",
+      "compiledAt": "2026-08-02T15:04:45.093Z",
+      "status": "active",
+      "downloadCount": 0,
+      "activeSessions": []
+    }
+  ]
+}
