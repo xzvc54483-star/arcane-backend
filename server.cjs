@@ -151,6 +151,19 @@ function isAdmin(interaction) {
 }
 
 // -------------------------------------------------------------------
+// API: Health Check
+// -------------------------------------------------------------------
+app.get('/api/health', (req, res) => {
+    try {
+        const keyCount = sql.prepare('SELECT COUNT(*) as count FROM keys').get().count;
+        const userCount = sql.prepare('SELECT COUNT(*) as count FROM users').get().count;
+        res.json({ status: 'ok', db: 'sqlite', keys: keyCount, users: userCount });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+});
+
+// -------------------------------------------------------------------
 // API: Generate License Key
 // -------------------------------------------------------------------
 app.post('/api/generatekey', (req, res) => {
