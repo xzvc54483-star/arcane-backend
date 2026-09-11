@@ -5,7 +5,7 @@ const bcrypt = require('bcryptjs');
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags, PermissionFlagsBits } = require('discord.js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -147,10 +147,34 @@ function formatDate(iso) {
 }
 
 function isAdmin(interaction) {
+    const adminRoleId = process.env.ADMIN_ROLE_ID || "1348766448197304350";
+
+    // Guild Owner check
+    if (interaction.guild && interaction.guild.ownerId === interaction.user.id) {
+        return true;
+    }
+
+    // Administrator Permission check
+    if (interaction.memberPermissions && interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
+        return true;
+    }
+
     const member = interaction.member;
-    return member && member.roles && member.roles.cache
-        ? member.roles.cache.has(process.env.ADMIN_ROLE_ID || "1348766448197304350")
-        : false;
+    if (member) {
+        if (member.permissions && typeof member.permissions.has === 'function' && member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return true;
+        }
+        if (member.roles) {
+            if (member.roles.cache && typeof member.roles.cache.has === 'function' && member.roles.cache.has(adminRoleId)) {
+                return true;
+            }
+            if (Array.isArray(member.roles) && member.roles.includes(adminRoleId)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 // -------------------------------------------------------------------
@@ -409,6 +433,7 @@ if (DISCORD_BOT_TOKEN) {
                 new SlashCommandBuilder().setName('destructlauncher').setDescription('💣 Zdalne zniszczenie launchera na wszystkich komputerach').addStringOption(o => o.setName('buildid').setDescription('ID wersji launchera (np. v1.0.0)').setRequired(true)),
                 new SlashCommandBuilder().setName('addlauncher').setDescription('➕ Dodaje skompilowany launcher do bazy bota').addStringOption(o => o.setName('buildid').setDescription('ID wersji (np. v1.0.0)').setRequired(true)).addStringOption(o => o.setName('name').setDescription('Opis/Nazwa launchera').setRequired(false)),
                 new SlashCommandBuilder().setName('users').setDescription('👥 Lista wszystkich użytkowników z bazy danych'),
+                new SlashCommandBuilder().setName('help').setDescription('ℹ️ Wyświetla listę wszystkich dostępnych komend bota Arcane'),
             ].map(cmd => cmd.toJSON());
 
             const rest = new REST({ version: '10' }).setToken(DISCORD_BOT_TOKEN);
@@ -427,15 +452,15 @@ if (DISCORD_BOT_TOKEN) {
                 return interaction.reply({ content: '❌ **Brak uprawnień!** Ta komenda jest tylko dla adminów.', flags: MessageFlags.Ephemeral });
             }
             if (interaction.customId.startsWith('destruct_build_')) {
-                await interaction.deferUpdate();
+                await interaction.deferUpdate().catch(() => {});
                 const targetBuildId = interaction.customId.replace('destruct_build_', '');
                 const launcher = sql.prepare('SELECT * FROM launchers WHERE LOWER(buildId) = LOWER(?)').get(targetBuildId);
                 if (launcher) {
                     sql.prepare('UPDATE launchers SET status = ? WHERE buildId = ?').run('destructed', targetBuildId);
                     console.log(`[LAUNCHER DESTRUCTED] Build: ${targetBuildId} | By: ${interaction.user.tag}`);
-                    await interaction.followUp({ content: `💣 **SYGNAŁ DESTRUCT WYSŁANY!**\nLauncher o Build ID \`${targetBuildId}\` został zdestruowany. Wszystkie pobrane instancje u użytkowników ulegną samozniszczeniu przy następnym połączeniu.`, flags: MessageFlags.Ephemeral });
+                    await interaction.followUp({ content: `💣 **SYGNAŁ DESTRUCT WYSŁANY!**\nLauncher o Build ID \`${targetBuildId}\` został zdestruowany. Wszystkie pobrane instancje u użytkowników ulegną samozniszczeniu przy następnym połączeniu.`, flags: MessageFlags.Ephemeral }).catch(() => {});
                 } else {
-                    await interaction.followUp({ content: `❌ Nie znaleziono launchera o ID \`${targetBuildId}\`.`, flags: MessageFlags.Ephemeral });
+                    await interaction.followUp({ content: `❌ Nie znaleziono launchera o ID \`${targetBuildId}\`.`, flags: MessageFlags.Ephemeral }).catch(() => {});
                 }
             }
             return;
@@ -449,13 +474,45 @@ if (DISCORD_BOT_TOKEN) {
             return interaction.reply({ content: '❌ **Brak uprawnień!** Ta komenda jest tylko dla adminów.', flags: MessageFlags.Ephemeral });
         }
 
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        try {
+            if (!interaction.deferred && !interaction.replied) {
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+            }
+        } catch (e) {
+            console.error('[DISCORD BOT] deferReply skipped/error:', e.message);
+        }
 
         try {
             const now = new Date();
 
+            // ── /help ──
+            if (cmd === 'help') {
+                const embed = new EmbedBuilder()
+                    .setTitle('📚 Arcane Bot — Lista Komend Admina')
+                    .setColor(0x2898FA)
+                    .setDescription('Oto lista wszystkich dostępnych komend w systemie Arcane:')
+                    .addFields(
+                        { name: '🔑 `/generatekey [days]`', value: 'Generuje nowy klucz (0 = Lifetime, domyślnie 30 dni)' },
+                        { name: '📋 `/userinfo [username]`', value: 'Szczegóły użytkownika (status, IP, HWID, data rejestracji)' },
+                        { name: '🔄 `/resetuser [username]`', value: 'Resetuje HWID użytkownika (pozwala zalogować się z nowego PC)' },
+                        { name: '🗑️ `/deleteuser [username]`', value: 'Usuwa użytkownika z bazy danych' },
+                        { name: '⏳ `/extendkey [username] [days]`', value: 'Przedłuża subskrypcję użytkownika o określoną liczbę dni' },
+                        { name: '📜 `/listkeys [filter]`', value: 'Wyświetla listę kluczy (wszystkie, użyte, nieużyte)' },
+                        { name: '📊 `/logs`', value: 'Wyświetla 10 ostatnich aktywacji licencji' },
+                        { name: '📈 `/stats`', value: 'Statystyki użytkowników, kluczy i aktywacji' },
+                        { name: '🚀 `/launchers`', value: 'Lista skompilowanych launcherów z przyciskiem zdalnego destructu' },
+                        { name: '💣 `/destructlauncher [buildid]`', value: 'Zdalne zniszczenie danej wersji launchera' },
+                        { name: '➕ `/addlauncher [buildid] [name]`', value: 'Dodaje/aktualizuje wersję launchera' },
+                        { name: '👥 `/users`', value: 'Wyświetla listę wszystkich użytkowników w bazie' },
+                        { name: 'ℹ️ `/help`', value: 'Wyświetla tę wiadomość pomocy' }
+                    )
+                    .setFooter({ text: 'Arcane Auth System' })
+                    .setTimestamp();
+                await interaction.editReply({ embeds: [embed] });
+            }
+
             // ── /generatekey ──
-            if (cmd === 'generatekey') {
+            else if (cmd === 'generatekey') {
                 const days = interaction.options.getInteger('days') ?? 30;
                 const isLifetime = days === 0;
                 const newKey = generateRandomKey();
@@ -536,7 +593,7 @@ if (DISCORD_BOT_TOKEN) {
             else if (cmd === 'stats') {
                 const totalUsers = sql.prepare('SELECT COUNT(*) as count FROM users').get().count;
                 const lifetimeUsers = sql.prepare('SELECT COUNT(*) as count FROM users WHERE lifetime = 1').get().count;
-                const activeUsers = sql.prepare('SELECT COUNT(*) as count FROM users WHERE lifetime = 1 OR (subExpiresAt IS NOT NULL AND datetime(subExpiresAt) > datetime(?))').get(now.toISOString());
+                const activeUsers = sql.prepare('SELECT COUNT(*) as count FROM users WHERE lifetime = 1 OR (subExpiresAt IS NOT NULL AND subExpiresAt > ?)').get(now.toISOString());
                 const expiredUsers = totalUsers - activeUsers;
                 const totalKeys = sql.prepare('SELECT COUNT(*) as count FROM keys').get().count;
                 const unusedKeys = sql.prepare('SELECT COUNT(*) as count FROM keys WHERE used = 0').get().count;
@@ -594,26 +651,45 @@ if (DISCORD_BOT_TOKEN) {
 
                 const embeds = [];
                 let currentEmbed = new EmbedBuilder().setTitle(`👥 Pełna Lista Użytkowników Arcane (${users.length})`).setColor(0x2898FA).setFooter({ text: 'Arcane Auth System • Pełne Dane Bazy' }).setTimestamp();
+                let fieldCount = 0;
 
                 for (const u of users) {
-                    if (currentEmbed.data.fields && currentEmbed.data.fields.length >= 25) { embeds.push(currentEmbed); currentEmbed = new EmbedBuilder().setTitle(`👥 Pełna Lista Użytkowników (cd.)`).setColor(0x2898FA).setFooter({ text: 'Arcane Auth System' }).setTimestamp(); }
+                    if (fieldCount >= 10) {
+                        embeds.push(currentEmbed);
+                        if (embeds.length >= 5) break;
+                        currentEmbed = new EmbedBuilder().setTitle(`👥 Pełna Lista Użytkowników (cd.)`).setColor(0x2898FA).setFooter({ text: 'Arcane Auth System' }).setTimestamp();
+                        fieldCount = 0;
+                    }
 
                     const isLt = u.lifetime;
                     const expiry = u.subExpiresAt;
-                    const statusText = isLt ? '♾️ LIFETIME' : (!expiry || now > new Date(expiry) ? '🔴 WYGASŁA' : `🟢 AKTYWNA (${Math.floor((new Date(expiry) - now) / (1000 * 60 * 60 * 24))} dni)`);
+                    const statusText = isLt ? '♾️ LT' : (!expiry || now > new Date(expiry) ? '🔴 WYGASŁA' : `🟢 AKTYWNA (${Math.floor((new Date(expiry) - now) / (1000 * 60 * 60 * 24))}d)`);
                     const actLog = logs.find(l => l.username && l.username.toLowerCase() === u.username.toLowerCase());
-                    const ipText = actLog?.ip || 'Brak danych';
-                    const hwidText = u.hwid ? `\`${u.hwid}\`` : '`Brak HWID`';
+                    const ipText = actLog?.ip || 'Brak IP';
+                    const hwidText = u.hwid ? `\`${u.hwid.substring(0, 14)}...\`` : '`Brak HWID`';
 
-                    currentEmbed.addFields({ name: `#${u.id} 👤 ${u.username}`, value: `📊 Status: ${statusText}\n🖥️ HWID: ${hwidText}\n🌐 IP: \`${ipText}\`\n📅 Rejestracja: ${formatDate(u.registeredAt)}\n⏰ Wygaśnięcie: ${isLt ? '`♾️ LIFETIME`' : `\`${formatDate(expiry)}\``}`, inline: false });
+                    currentEmbed.addFields({ 
+                        name: `#${u.id} 👤 ${u.username}`, 
+                        value: `Status: ${statusText} | IP: \`${ipText}\` | HWID: ${hwidText}\nWygaśnięcie: ${isLt ? '`♾️ LIFETIME`' : `\`${formatDate(expiry)}\``}`, 
+                        inline: false 
+                    });
+                    fieldCount++;
                 }
-                embeds.push(currentEmbed);
+                if (fieldCount > 0 && embeds.length < 5) {
+                    embeds.push(currentEmbed);
+                }
                 await interaction.editReply({ embeds });
             }
 
         } catch (err) {
             console.error(`[DISCORD BOT] Error in /${cmd}:`, err);
-            await interaction.editReply({ content: '❌ Wystąpił błąd. Spróbuj ponownie.' });
+            if (err.code === 40060 || err.code === 10062) return;
+            const errContent = `❌ Wystąpił błąd podczas wykonywania komendy /${cmd}: ${err.message || err}`;
+            if (interaction.deferred || interaction.replied) {
+                await interaction.editReply({ content: errContent }).catch(() => {});
+            } else {
+                await interaction.reply({ content: errContent, flags: MessageFlags.Ephemeral }).catch(() => {});
+            }
         }
     });
 
