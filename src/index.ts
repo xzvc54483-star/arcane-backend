@@ -1,6 +1,5 @@
 import { Elysia } from 'elysia';
 import { cors } from '@elysiajs/cors';
-import Database from 'better-sqlite3';
 import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags, PermissionFlagsBits } from 'discord.js';
 import path from 'path';
 import fs from 'fs';
@@ -12,10 +11,19 @@ const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || "";
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || "";
 const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID || "1348766448197304350";
 
-// Initialize SQLite database
-const sql = new Database(DB_FILE);
-sql.pragma('journal_mode = WAL');
-sql.pragma('foreign_keys = ON');
+// Initialize SQLite database (Bun native sqlite or better-sqlite3 fallback)
+let sql: any;
+if (typeof (globalThis as any).Bun !== 'undefined') {
+    const { Database } = require('bun:sqlite');
+    sql = new Database(DB_FILE);
+    sql.exec('PRAGMA journal_mode = WAL;');
+    sql.exec('PRAGMA foreign_keys = ON;');
+} else {
+    const Database = require('better-sqlite3');
+    sql = new Database(DB_FILE);
+    sql.pragma('journal_mode = WAL');
+    sql.pragma('foreign_keys = ON');
+}
 
 // Initialize SQLite Tables
 function initDatabase() {
