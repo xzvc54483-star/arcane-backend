@@ -11,6 +11,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const DB_FILE = path.join(__dirname, 'arcane.db');
 
+app.use(cors());
+app.use(express.json());
+
 const sql = new Database(DB_FILE);
 
 // Enable WAL mode for better concurrency
