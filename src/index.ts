@@ -1,57 +1,76 @@
 import { Elysia } from 'elysia';
 import { cors } from '@elysiajs/cors';
-import postgres from 'postgres';
-import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, MessageFlags } from 'discord.js';
+import Database from 'better-sqlite3';
+import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags, PermissionFlagsBits } from 'discord.js';
+import path from 'path';
+import fs from 'fs';
+import bcrypt from 'bcryptjs';
 
-const PORT = process.env.PORT || 3000;
-const DATABASE_URL = process.env.DATABASE_URL || "";
+const PORT = Number(process.env.PORT) || 3000;
+const DB_FILE = path.join(process.cwd(), 'arcane.db');
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || "";
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || "";
 const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID || "1348766448197304350";
 
-// Initialize external PostgreSQL client
-const sql = DATABASE_URL ? postgres(DATABASE_URL, { ssl: DATABASE_URL.includes('.render.com') ? 'require' : false }) : null;
+// Initialize SQLite database
+const sql = new Database(DB_FILE);
+sql.pragma('journal_mode = WAL');
+sql.pragma('foreign_keys = ON');
 
-// Rate-limiting / Brute-force protection memory store
-interface FailedAttempt {
-    count: number;
-    blockedUntil: number;
-}
-const loginAttempts = new Map<string, FailedAttempt>();
-
-// Anti Brute-Force Rate Limiter
-function checkRateLimit(identifier: string): { allowed: boolean; remainingSec: number } {
-    const now = Date.now();
-    const attempt = loginAttempts.get(identifier);
-
-    if (attempt) {
-        if (attempt.blockedUntil > now) {
-            const remainingSec = Math.ceil((attempt.blockedUntil - now) / 1000);
-            return { allowed: false, remainingSec };
-        }
-        if (attempt.blockedUntil <= now && attempt.count >= 5) {
-            loginAttempts.delete(identifier);
-        }
+// Initialize SQLite Tables
+function initDatabase() {
+    try {
+        console.log('[DB] Initializing SQLite tables...');
+        sql.exec(`
+            CREATE TABLE IF NOT EXISTS keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT UNIQUE NOT NULL,
+                durationDays INTEGER NOT NULL DEFAULT 30,
+                used INTEGER DEFAULT 0,
+                usedBy TEXT,
+                usedAt TEXT,
+                createdAt TEXT NOT NULL,
+                createdBy TEXT
+            );
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                hwid TEXT DEFAULT '',
+                subExpiresAt TEXT,
+                lifetime INTEGER DEFAULT 0,
+                registeredAt TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS activation_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event TEXT NOT NULL,
+                username TEXT NOT NULL,
+                key TEXT,
+                ip TEXT,
+                hwid TEXT,
+                lifetime INTEGER DEFAULT 0,
+                expiresAt TEXT,
+                activatedAt TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS launchers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                buildId TEXT UNIQUE NOT NULL,
+                name TEXT,
+                compiledAt TEXT NOT NULL,
+                status TEXT DEFAULT 'active',
+                downloadCount INTEGER DEFAULT 0,
+                activeSessions TEXT DEFAULT '[]'
+            );
+        `);
+        console.log('[DB] SQLite tables initialized successfully.');
+    } catch (err: any) {
+        console.error('[DB ERROR] Failed to initialize SQLite tables:', err?.message || err);
     }
-    return { allowed: true, remainingSec: 0 };
 }
 
-function recordFailedAttempt(identifier: string) {
-    const now = Date.now();
-    const attempt = loginAttempts.get(identifier) || { count: 0, blockedUntil: 0 };
-    attempt.count += 1;
-    if (attempt.count >= 5) {
-        attempt.blockedUntil = now + (15 * 60 * 1000);
-        console.warn(`[SECURITY ALERT] Brute-force detected! Blocked '${identifier}' for 15 minutes.`);
-    }
-    loginAttempts.set(identifier, attempt);
-}
+initDatabase();
 
-function resetFailedAttempt(identifier: string) {
-    loginAttempts.delete(identifier);
-}
-
-// Helper: Generate secure random key
+// Helpers
 function generateRandomKey(): string {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     let result = 'ARCANE-';
@@ -62,301 +81,37 @@ function generateRandomKey(): string {
     return result;
 }
 
-// Helper: format date nicely (Warsaw timezone)
 function formatDate(date: Date | string | null): string {
     if (!date) return 'N/A';
     return new Date(date).toLocaleString('pl-PL', { timeZone: 'Europe/Warsaw' });
 }
 
-// Helper: check admin role in Discord interaction
 function isAdmin(interaction: any): boolean {
+    if (interaction.guild && interaction.guild.ownerId === interaction.user.id) {
+        return true;
+    }
+    if (interaction.memberPermissions && interaction.memberPermissions.has(PermissionFlagsBits.Administrator)) {
+        return true;
+    }
     const member = interaction.member;
-    return member && member.roles && member.roles.cache
-        ? member.roles.cache.has(ADMIN_ROLE_ID)
-        : false;
+    if (member) {
+        if (member.permissions && typeof member.permissions.has === 'function' && member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return true;
+        }
+        if (member.roles) {
+            if (member.roles.cache && typeof member.roles.cache.has === 'function' && member.roles.cache.has(ADMIN_ROLE_ID)) {
+                return true;
+            }
+            if (Array.isArray(member.roles) && member.roles.includes(ADMIN_ROLE_ID)) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
-// Initialize Database Tables (with new columns for lifetime & activation_logs)
-async function initDatabase() {
-    if (!sql) {
-        console.log('[DATABASE] Warning: DATABASE_URL not set.');
-        return;
-    }
-
-    try {
-        // Keys table
-        await sql`
-            CREATE TABLE IF NOT EXISTS keys (
-                id SERIAL PRIMARY KEY,
-                code VARCHAR(64) UNIQUE NOT NULL,
-                duration_days INT NOT NULL DEFAULT 30,
-                used BOOLEAN DEFAULT FALSE,
-                used_by VARCHAR(64),
-                used_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                created_by VARCHAR(64)
-            );
-        `;
-
-        // Users table — sub_expires_at nullable (lifetime users have NULL)
-        await sql`
-            CREATE TABLE IF NOT EXISTS users (
-                id SERIAL PRIMARY KEY,
-                username VARCHAR(64) UNIQUE NOT NULL,
-                password TEXT NOT NULL,
-                hwid VARCHAR(128),
-                sub_expires_at TIMESTAMP,
-                lifetime BOOLEAN DEFAULT FALSE,
-                registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        `;
-
-        // Activation logs table
-        await sql`
-            CREATE TABLE IF NOT EXISTS activation_logs (
-                id SERIAL PRIMARY KEY,
-                username VARCHAR(64),
-                key_code VARCHAR(64),
-                ip VARCHAR(64),
-                hwid VARCHAR(128),
-                lifetime BOOLEAN DEFAULT FALSE,
-                expires_at VARCHAR(64),
-                activated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        `;
-
-        // Safely add missing columns to existing tables (idempotent)
-        await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS lifetime BOOLEAN DEFAULT FALSE;`;
-        await sql`ALTER TABLE users ALTER COLUMN sub_expires_at DROP NOT NULL;`;
-
-        console.log('[DATABASE] PostgreSQL tables verified & ready.');
-    } catch (err) {
-        console.error('[DATABASE ERROR] Failed to initialize PostgreSQL:', err);
-    }
-}
-
-initDatabase();
-
 // -------------------------------------------------------------------
-// ElysiaJS App
-// -------------------------------------------------------------------
-const app = new Elysia()
-    .use(cors())
-
-    // Security Headers
-    .onRequest(({ set }) => {
-        set.headers['X-Content-Type-Options'] = 'nosniff';
-        set.headers['X-Frame-Options'] = 'DENY';
-        set.headers['X-XSS-Protection'] = '1; mode=block';
-    })
-
-    .get('/', () => ({
-        status: 'online',
-        server: 'ElysiaJS + Bun (Secure API)',
-        database: sql ? 'External PostgreSQL (Protected)' : 'Disconnected'
-    }))
-
-    // -------------------------------------------------------------------
-    // API: Generate License Key
-    // -------------------------------------------------------------------
-    .post('/api/generatekey', async ({ body }: { body: { days?: number } }) => {
-        if (!sql) return { success: false, message: "Database connection unavailable." };
-
-        const durationDays = parseInt(String(body?.days ?? 30));
-        const isLifetime = durationDays === 0;
-        const newKey = generateRandomKey();
-
-        await sql`
-            INSERT INTO keys (code, duration_days, used)
-            VALUES (${newKey}, ${durationDays}, FALSE);
-        `;
-
-        console.log(`[KEY-GEN] Code: ${newKey} | Days: ${isLifetime ? 'LIFETIME' : durationDays}`);
-        return { success: true, key: newKey, days: durationDays, lifetime: isLifetime };
-    })
-
-    // -------------------------------------------------------------------
-    // API: Register User Account
-    // -------------------------------------------------------------------
-    .post('/api/register', async ({ body, request }: { body: { username?: string; password?: string; key?: string; hwid?: string }; request: Request }) => {
-        const username = body?.username?.trim();
-        const password = body?.password;
-        const key = body?.key?.trim();
-        const hwid = body?.hwid?.trim();
-
-        if (!username || !password || !key) {
-            return { success: false, message: "Username, password, and license key are required!" };
-        }
-
-        if (username.length < 3 || username.length > 32 || password.length < 3 || password.length > 128) {
-            return { success: false, message: "Invalid username or password length!" };
-        }
-
-        if (!/^[a-zA-Z0-9_]+$/.test(username)) {
-            return { success: false, message: "Username contains invalid characters!" };
-        }
-
-        if (!sql) return { success: false, message: "Database connection unavailable." };
-
-        const clientIP = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'Unknown';
-        const rateCheck = checkRateLimit(clientIP);
-        if (!rateCheck.allowed) {
-            return { success: false, message: `Too many attempts! Blocked for ${rateCheck.remainingSec} seconds.` };
-        }
-
-        const existingUser = await sql`SELECT id FROM users WHERE LOWER(username) = LOWER(${username})`;
-        if (existingUser.length > 0) {
-            return { success: false, message: "Username is already taken!" };
-        }
-
-        const keysFound = await sql`SELECT * FROM keys WHERE code = ${key} AND used = FALSE`;
-        if (keysFound.length === 0) {
-            recordFailedAttempt(clientIP);
-            return { success: false, message: "Invalid or already used license key!" };
-        }
-
-        const targetKey = keysFound[0];
-        const isLifetime = targetKey.duration_days === 0;
-
-        await sql`UPDATE keys SET used = TRUE, used_by = ${username}, used_at = NOW() WHERE code = ${key};`;
-
-        const now = new Date();
-        const expiresAt = isLifetime ? null : new Date(now.getTime() + targetKey.duration_days * 24 * 60 * 60 * 1000);
-
-        const hashedPassword = await Bun.password.hash(password, {
-            algorithm: 'argon2id',
-            memoryCost: 65536,
-            timeCost: 3
-        });
-
-        await sql`
-            INSERT INTO users (username, password, hwid, sub_expires_at, lifetime)
-            VALUES (${username}, ${hashedPassword}, ${hwid || ''}, ${expiresAt}, ${isLifetime});
-        `;
-
-        // Save activation log
-        await sql`
-            INSERT INTO activation_logs (username, key_code, ip, hwid, lifetime, expires_at)
-            VALUES (${username}, ${key}, ${clientIP}, ${hwid || 'Not provided'}, ${isLifetime}, ${isLifetime ? 'LIFETIME' : expiresAt!.toISOString()});
-        `;
-
-        resetFailedAttempt(clientIP);
-        console.log(`[REGISTER-SUCCESS] User: ${username} | IP: ${clientIP} | HWID: ${hwid} | Expires: ${isLifetime ? 'LIFETIME' : expiresAt!.toISOString()}`);
-
-        return {
-            success: true,
-            message: "Account registered successfully!",
-            expiresAt: isLifetime ? null : expiresAt!.toISOString(),
-            lifetime: isLifetime
-        };
-    })
-
-    // -------------------------------------------------------------------
-    // API: Login User
-    // -------------------------------------------------------------------
-    .post('/api/login', async ({ body, request }: { body: { username?: string; password?: string; hwid?: string }; request: Request }) => {
-        const username = body?.username?.trim();
-        const password = body?.password;
-        const hwid = body?.hwid?.trim();
-
-        if (!username || !password) {
-            return { success: false, message: "Username and password are required!" };
-        }
-
-        if (!sql) return { success: false, message: "Database connection unavailable." };
-
-        const clientIP = request.headers.get('x-forwarded-for') || 'local';
-        const rateCheckUser = checkRateLimit(username.toLowerCase());
-        const rateCheckIP = checkRateLimit(clientIP);
-
-        if (!rateCheckUser.allowed || !rateCheckIP.allowed) {
-            const waitTime = Math.max(rateCheckUser.remainingSec, rateCheckIP.remainingSec);
-            return { success: false, message: `Account locked due to multiple failed logins! Try again in ${waitTime} seconds.` };
-        }
-
-        const usersFound = await sql`SELECT * FROM users WHERE LOWER(username) = LOWER(${username})`;
-        if (usersFound.length === 0) {
-            recordFailedAttempt(username.toLowerCase());
-            recordFailedAttempt(clientIP);
-            return { success: false, message: "Invalid username or password!" };
-        }
-
-        const user = usersFound[0];
-
-        const passwordValid = await Bun.password.verify(password, user.password);
-        if (!passwordValid) {
-            recordFailedAttempt(username.toLowerCase());
-            recordFailedAttempt(clientIP);
-            return { success: false, message: "Invalid username or password!" };
-        }
-
-        if (user.hwid && hwid && user.hwid !== hwid) {
-            recordFailedAttempt(username.toLowerCase());
-            console.warn(`[HWID MISMATCH] User '${username}' from unauthorized HWID: ${hwid}`);
-            return { success: false, message: "HWID mismatch! This PC is not authorized for this account." };
-        }
-
-        if (!user.hwid && hwid) {
-            await sql`UPDATE users SET hwid = ${hwid} WHERE id = ${user.id}`;
-        }
-
-        // Lifetime users never expire
-        if (user.lifetime) {
-            resetFailedAttempt(username.toLowerCase());
-            resetFailedAttempt(clientIP);
-            console.log(`[LOGIN-SUCCESS] User: ${username} | LIFETIME`);
-            return {
-                success: true,
-                message: "Login successful!",
-                username: user.username,
-                expiresAt: null,
-                lifetime: true,
-                daysLeft: -1,
-                hoursLeft: -1
-            };
-        }
-
-        const now = new Date();
-        const subDate = new Date(user.sub_expires_at);
-
-        if (now > subDate) {
-            return { success: false, message: "Subscription EXPIRED! Buy new license.", expired: true };
-        }
-
-        resetFailedAttempt(username.toLowerCase());
-        resetFailedAttempt(clientIP);
-
-        const diffMs = subDate.getTime() - now.getTime();
-        const daysLeft = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-        const hoursLeft = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-
-        console.log(`[LOGIN-SUCCESS] User: ${username} | Sub Left: ${daysLeft}d ${hoursLeft}h`);
-        return {
-            success: true,
-            message: "Login successful!",
-            username: user.username,
-            expiresAt: user.sub_expires_at,
-            lifetime: false,
-            daysLeft,
-            hoursLeft
-        };
-    })
-
-    // -------------------------------------------------------------------
-    // API: View Activation Logs
-    // -------------------------------------------------------------------
-    .get('/api/logs', async () => {
-        if (!sql) return { success: false, message: "Database connection unavailable." };
-        const logs = await sql`SELECT * FROM activation_logs ORDER BY activated_at DESC LIMIT 100`;
-        return { success: true, total: logs.length, logs };
-    })
-
-    .listen(PORT);
-
-console.log(`🚀 ElysiaJS + Bun Secure Auth Backend running on port ${PORT}`);
-
-// -------------------------------------------------------------------
-// Discord Bot — All Admin Slash Commands
+// Discord Bot Setup
 // -------------------------------------------------------------------
 if (DISCORD_BOT_TOKEN) {
     const client = new Client({ intents: [GatewayIntentBits.Guilds] });
@@ -366,49 +121,19 @@ if (DISCORD_BOT_TOKEN) {
 
         if (DISCORD_CLIENT_ID) {
             const commands = [
-                new SlashCommandBuilder()
-                    .setName('generatekey')
-                    .setDescription('🔑 Generuje nowy klucz licencji Arcane')
-                    .addIntegerOption(o => o.setName('days').setDescription('Czas w dniach (0 = Lifetime)').setRequired(true).setMinValue(0)),
-
-                new SlashCommandBuilder()
-                    .setName('userinfo')
-                    .setDescription('📋 Informacje o użytkowniku')
-                    .addStringOption(o => o.setName('username').setDescription('Nazwa użytkownika').setRequired(true)),
-
-                new SlashCommandBuilder()
-                    .setName('resetuser')
-                    .setDescription('🔄 Resetuje HWID użytkownika (zmiana PC)')
-                    .addStringOption(o => o.setName('username').setDescription('Nazwa użytkownika').setRequired(true)),
-
-                new SlashCommandBuilder()
-                    .setName('deleteuser')
-                    .setDescription('🗑️ Usuwa użytkownika z bazy')
-                    .addStringOption(o => o.setName('username').setDescription('Nazwa użytkownika').setRequired(true)),
-
-                new SlashCommandBuilder()
-                    .setName('extendkey')
-                    .setDescription('⏳ Przedłuża subskrypcję użytkownika')
-                    .addStringOption(o => o.setName('username').setDescription('Nazwa użytkownika').setRequired(true))
-                    .addIntegerOption(o => o.setName('days').setDescription('Liczba dni do dodania').setRequired(true).setMinValue(1)),
-
-                new SlashCommandBuilder()
-                    .setName('listkeys')
-                    .setDescription('📜 Lista wygenerowanych kluczy')
-                    .addStringOption(o => o.setName('filter').setDescription('Filtr').addChoices(
-                        { name: 'Wszystkie', value: 'all' },
-                        { name: 'Nieużyte', value: 'unused' },
-                        { name: 'Użyte', value: 'used' }
-                    )),
-
-                new SlashCommandBuilder()
-                    .setName('logs')
-                    .setDescription('📊 Ostatnie aktywacje licencji'),
-
-                new SlashCommandBuilder()
-                    .setName('stats')
-                    .setDescription('📈 Statystyki systemu Arcane'),
-
+                new SlashCommandBuilder().setName('generatekey').setDescription('🔑 Generuje nowy klucz licencji Arcane').addIntegerOption(o => o.setName('days').setDescription('Czas w dniach (0 = Lifetime)').setRequired(true).setMinValue(0)),
+                new SlashCommandBuilder().setName('userinfo').setDescription('📋 Informacje o użytkowniku').addStringOption(o => o.setName('username').setDescription('Nazwa użytkownika').setRequired(true)),
+                new SlashCommandBuilder().setName('resetuser').setDescription('🔄 Resetuje HWID użytkownika (zmiana PC)').addStringOption(o => o.setName('username').setDescription('Nazwa użytkownika').setRequired(true)),
+                new SlashCommandBuilder().setName('deleteuser').setDescription('🗑️ Usuwa użytkownika z bazy').addStringOption(o => o.setName('username').setDescription('Nazwa użytkownika').setRequired(true)),
+                new SlashCommandBuilder().setName('extendkey').setDescription('⏳ Przedłuża subskrypcję użytkownika').addStringOption(o => o.setName('username').setDescription('Nazwa użytkownika').setRequired(true)).addIntegerOption(o => o.setName('days').setDescription('Liczba dni do dodania').setRequired(true).setMinValue(1)),
+                new SlashCommandBuilder().setName('listkeys').setDescription('📜 Lista wygenerowanych kluczy').addStringOption(o => o.setName('filter').setDescription('Filtr').addChoices({ name: 'Wszystkie', value: 'all' }, { name: 'Nieużyte', value: 'unused' }, { name: 'Użyte', value: 'used' })),
+                new SlashCommandBuilder().setName('logs').setDescription('📊 Ostatnie aktywacje licencji'),
+                new SlashCommandBuilder().setName('stats').setDescription('📈 Statystyki systemu Arcane'),
+                new SlashCommandBuilder().setName('launchers').setDescription('🚀 Pokazuje listę skompilowanych launcherów oraz opcję destruct'),
+                new SlashCommandBuilder().setName('destructlauncher').setDescription('💣 Zdalne zniszczenie launchera na wszystkich komputerach').addStringOption(o => o.setName('buildid').setDescription('ID wersji launchera (np. v1.0.0)').setRequired(true)),
+                new SlashCommandBuilder().setName('addlauncher').setDescription('➕ Dodaje skompilowany launcher do bazy bota').addStringOption(o => o.setName('buildid').setDescription('ID wersji (np. v1.0.0)').setRequired(true)).addStringOption(o => o.setName('name').setDescription('Opis/Nazwa launchera').setRequired(false)),
+                new SlashCommandBuilder().setName('users').setDescription('👥 Lista wszystkich użytkowników z bazy danych'),
+                new SlashCommandBuilder().setName('help').setDescription('ℹ️ Wyświetla listę wszystkich dostępnych komend bota Arcane'),
             ].map(cmd => cmd.toJSON());
 
             const rest = new REST({ version: '10' }).setToken(DISCORD_BOT_TOKEN);
@@ -422,6 +147,25 @@ if (DISCORD_BOT_TOKEN) {
     });
 
     client.on('interactionCreate', async (interaction: any) => {
+        if (interaction.isButton()) {
+            if (!isAdmin(interaction)) {
+                return interaction.reply({ content: '❌ **Brak uprawnień!** Ta komenda jest tylko dla adminów.', flags: MessageFlags.Ephemeral });
+            }
+            if (interaction.customId.startsWith('destruct_build_')) {
+                await interaction.deferUpdate().catch(() => {});
+                const targetBuildId = interaction.customId.replace('destruct_build_', '');
+                const launcher = sql.prepare('SELECT * FROM launchers WHERE LOWER(buildId) = LOWER(?)').get(targetBuildId) as any;
+                if (launcher) {
+                    sql.prepare('UPDATE launchers SET status = ? WHERE buildId = ?').run('destructed', targetBuildId);
+                    console.log(`[LAUNCHER DESTRUCTED] Build: ${targetBuildId} | By: ${interaction.user.tag}`);
+                    await interaction.followUp({ content: `💣 **SYGNAŁ DESTRUCT WYSŁANY!**\nLauncher o Build ID \`${targetBuildId}\` został zdestruowany. Wszystkie pobrane instancje u użytkowników ulegną samozniszczeniu przy następnym połączeniu.`, flags: MessageFlags.Ephemeral }).catch(() => {});
+                } else {
+                    await interaction.followUp({ content: `❌ Nie znaleziono launchera o ID \`${targetBuildId}\`.`, flags: MessageFlags.Ephemeral }).catch(() => {});
+                }
+            }
+            return;
+        }
+
         if (!interaction.isChatInputCommand()) return;
 
         const cmd = interaction.commandName;
@@ -430,261 +174,350 @@ if (DISCORD_BOT_TOKEN) {
             return interaction.reply({ content: '❌ **Brak uprawnień!** Ta komenda jest tylko dla adminów.', flags: MessageFlags.Ephemeral });
         }
 
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        try {
+            if (!interaction.deferred && !interaction.replied) {
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+            }
+        } catch (e: any) {
+            console.error('[DISCORD BOT] deferReply skipped/error:', e?.message || e);
+        }
 
         try {
-            // ── /generatekey ──────────────────────────────────────────
-            if (cmd === 'generatekey') {
+            const now = new Date();
+
+            // ── /help ──
+            if (cmd === 'help') {
+                const embed = new EmbedBuilder()
+                    .setTitle('📚 Arcane Bot — Lista Komend Admina')
+                    .setColor(0x2898FA)
+                    .setDescription('Oto lista wszystkich dostępnych komend w systemie Arcane:')
+                    .addFields(
+                        { name: '🔑 `/generatekey [days]`', value: 'Generuje nowy klucz (0 = Lifetime, domyślnie 30 dni)' },
+                        { name: '📋 `/userinfo [username]`', value: 'Szczegóły użytkownika (status, IP, HWID, data rejestracji)' },
+                        { name: '🔄 `/resetuser [username]`', value: 'Resetuje HWID użytkownika (pozwala zalogować się z nowego PC)' },
+                        { name: '🗑️ `/deleteuser [username]`', value: 'Usuwa użytkownika z bazy danych' },
+                        { name: '⏳ `/extendkey [username] [days]`', value: 'Przedłuża subskrypcję użytkownika o określoną liczbę dni' },
+                        { name: '📜 `/listkeys [filter]`', value: 'Wyświetla listę kluczy (wszystkie, użyte, nieużyte)' },
+                        { name: '📊 `/logs`', value: 'Wyświetla 10 ostatnich aktywacji licencji' },
+                        { name: '📈 `/stats`', value: 'Statystyki użytkowników, kluczy i aktywacji' },
+                        { name: '🚀 `/launchers`', value: 'Lista skompilowanych launcherów z przyciskiem zdalnego destructu' },
+                        { name: '💣 `/destructlauncher [buildid]`', value: 'Zdalne zniszczenie danej wersji launchera' },
+                        { name: '➕ `/addlauncher [buildid] [name]`', value: 'Dodaje/aktualizuje wersję launchera' },
+                        { name: '👥 `/users`', value: 'Wyświetla listę wszystkich użytkowników w bazie' },
+                        { name: 'ℹ️ `/help`', value: 'Wyświetla tę wiadomość pomocy' }
+                    )
+                    .setFooter({ text: 'Arcane Auth System' })
+                    .setTimestamp();
+                await interaction.editReply({ embeds: [embed] });
+            }
+
+            // ── /generatekey ──
+            else if (cmd === 'generatekey') {
                 const days = interaction.options.getInteger('days') ?? 30;
                 const isLifetime = days === 0;
                 const newKey = generateRandomKey();
-
-                if (sql) {
-                    await sql`INSERT INTO keys (code, duration_days, used, created_by) VALUES (${newKey}, ${days}, FALSE, ${interaction.user.tag});`;
-                }
-
+                sql.prepare('INSERT INTO keys (code, durationDays, used, createdAt, createdBy) VALUES (?, ?, 0, ?, ?)').run(newKey, days, new Date().toISOString(), interaction.user.tag);
                 console.log(`[KEY CREATED] ${newKey} | ${isLifetime ? 'LIFETIME' : days + 'd'} | By: ${interaction.user.tag}`);
-
-                await interaction.editReply({ embeds: [
-                    new EmbedBuilder()
-                        .setTitle('⚡ Klucz Licencji Wygenerowany')
-                        .setColor(isLifetime ? 0xFFD700 : 0x2898FA)
-                        .addFields(
-                            { name: '🔑 Klucz', value: `\`\`\`${newKey}\`\`\`` },
-                            { name: '⏰ Czas', value: isLifetime ? '♾️ LIFETIME' : `${days} dni`, inline: true },
-                            { name: '👤 Przez', value: `<@${interaction.user.id}>`, inline: true }
-                        )
-                        .setFooter({ text: 'Arcane Auth • Tylko ty widzisz tę wiadomość' })
-                        .setTimestamp()
-                ]});
+                await interaction.editReply({ embeds: [new EmbedBuilder().setTitle('⚡ Klucz Licencji Wygenerowany').setColor(isLifetime ? 0xFFD700 : 0x2898FA).addFields({ name: '🔑 Klucz', value: `\`\`\`${newKey}\`\`\`` }, { name: '⏰ Czas', value: isLifetime ? '♾️ LIFETIME' : `${days} dni`, inline: true }, { name: '👤 Przez', value: `<@${interaction.user.id}>`, inline: true }).setFooter({ text: 'Arcane Auth • Tylko ty widzisz tę wiadomość' }).setTimestamp()]});
             }
 
-            // ── /userinfo ─────────────────────────────────────────────
+            // ── /userinfo ──
             else if (cmd === 'userinfo') {
-                if (!sql) return interaction.editReply({ content: '❌ Brak połączenia z bazą.' });
                 const username = interaction.options.getString('username');
-                const users = await sql`SELECT * FROM users WHERE LOWER(username) = LOWER(${username})`;
+                const user = sql.prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)').get(username) as any;
+                if (!user) return interaction.editReply({ content: `❌ Użytkownik **${username}** nie istnieje.` });
 
-                if (users.length === 0) {
-                    return interaction.editReply({ content: `❌ Użytkownik **${username}** nie istnieje.` });
-                }
+                const daysLeft = user.lifetime ? '∞' : (() => { if (!user.subExpiresAt || now > new Date(user.subExpiresAt)) return '0'; return Math.floor((new Date(user.subExpiresAt).getTime() - now.getTime()) / (1000 * 60 * 60 * 24)); })();
+                const statusText = user.lifetime ? '♾️ LIFETIME' : (!user.subExpiresAt || now > new Date(user.subExpiresAt) ? '🔴 WYGASŁA' : `🟢 AKTYWNA (${daysLeft} dni)`);
+                const logs = sql.prepare('SELECT * FROM activation_logs WHERE LOWER(username) = LOWER(?) ORDER BY id DESC LIMIT 1').all(username) as any[];
 
-                const user = users[0];
-                const now = new Date();
-                let statusText: string;
-
-                if (user.lifetime) {
-                    statusText = '♾️ LIFETIME';
-                } else if (!user.sub_expires_at || now > new Date(user.sub_expires_at)) {
-                    statusText = '🔴 WYGASŁA';
-                } else {
-                    const diff = new Date(user.sub_expires_at).getTime() - now.getTime();
-                    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-                    statusText = `🟢 AKTYWNA (${days} dni)`;
-                }
-
-                const logs = await sql`SELECT * FROM activation_logs WHERE LOWER(username) = LOWER(${username}) LIMIT 1`;
-                const activationLog = logs[0];
-
-                await interaction.editReply({ embeds: [
-                    new EmbedBuilder()
-                        .setTitle(`📋 Info o użytkowniku: ${user.username}`)
-                        .setColor(0x2898FA)
-                        .addFields(
-                            { name: '🖥️ HWID', value: user.hwid || 'Nie powiązano', inline: false },
-                            { name: '🌐 IP (rejestracja)', value: activationLog?.ip || 'Brak danych', inline: true },
-                            { name: '📅 Rejestracja', value: formatDate(user.registered_at), inline: true },
-                            { name: '⏰ Wygaśnięcie', value: user.lifetime ? '♾️ LIFETIME' : formatDate(user.sub_expires_at), inline: true },
-                            { name: '📊 Status', value: statusText, inline: true }
-                        )
-                        .setFooter({ text: 'Arcane Auth System' })
-                        .setTimestamp()
-                ]});
+                await interaction.editReply({ embeds: [new EmbedBuilder().setTitle(`📋 Info o użytkowniku: ${user.username}`).setColor(0x2898FA).addFields({ name: '🖥️ HWID', value: user.hwid || 'Nie powiązano', inline: false }, { name: '🌐 IP', value: logs[0]?.ip || 'Brak danych', inline: true }, { name: '📅 Rejestracja', value: formatDate(user.registeredAt), inline: true }, { name: '⏰ Wygaśnięcie', value: user.lifetime ? '♾️ LIFETIME' : formatDate(user.subExpiresAt), inline: true }, { name: '📊 Status', value: statusText, inline: true }).setFooter({ text: 'Arcane Auth System' }).setTimestamp()]});
             }
 
-            // ── /resetuser ────────────────────────────────────────────
+            // ── /resetuser ──
             else if (cmd === 'resetuser') {
-                if (!sql) return interaction.editReply({ content: '❌ Brak połączenia z bazą.' });
                 const username = interaction.options.getString('username');
-                const users = await sql`SELECT * FROM users WHERE LOWER(username) = LOWER(${username})`;
-
-                if (users.length === 0) {
-                    return interaction.editReply({ content: `❌ Użytkownik **${username}** nie istnieje.` });
-                }
-
-                const oldHwid = users[0].hwid || 'Brak';
-                await sql`UPDATE users SET hwid = '' WHERE LOWER(username) = LOWER(${username})`;
-                console.log(`[HWID RESET] User: ${username} | By: ${interaction.user.tag}`);
-
-                await interaction.editReply({ embeds: [
-                    new EmbedBuilder()
-                        .setTitle('🔄 HWID Zresetowany')
-                        .setColor(0xFFA500)
-                        .addFields(
-                            { name: '👤 Użytkownik', value: username, inline: true },
-                            { name: '🖥️ Stary HWID', value: oldHwid, inline: true },
-                            { name: '✅ Status', value: 'Użytkownik może zalogować się z nowego PC', inline: false }
-                        )
-                        .setFooter({ text: `Reset przez ${interaction.user.tag}` })
-                        .setTimestamp()
-                ]});
+                const user = sql.prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)').get(username) as any;
+                if (!user) return interaction.editReply({ content: `❌ Użytkownik **${username}** nie istnieje.` });
+                const oldHwid = user.hwid || 'Brak';
+                sql.prepare('UPDATE users SET hwid = "" WHERE id = ?').run(user.id);
+                console.log(`[HWID RESET] User: ${username} | Old HWID: ${oldHwid} | By: ${interaction.user.tag}`);
+                await interaction.editReply({ embeds: [new EmbedBuilder().setTitle('🔄 HWID Zresetowany').setColor(0xFFA500).addFields({ name: '👤 Użytkownik', value: username, inline: true }, { name: '🖥️ Stary HWID', value: oldHwid, inline: true }, { name: '✅ Status', value: 'Użytkownik może zalogować się z nowego PC', inline: false }).setFooter({ text: `Reset przez ${interaction.user.tag}` }).setTimestamp()]});
             }
 
-            // ── /deleteuser ───────────────────────────────────────────
+            // ── /deleteuser ──
             else if (cmd === 'deleteuser') {
-                if (!sql) return interaction.editReply({ content: '❌ Brak połączenia z bazą.' });
                 const username = interaction.options.getString('username');
-                const users = await sql`SELECT id FROM users WHERE LOWER(username) = LOWER(${username})`;
-
-                if (users.length === 0) {
-                    return interaction.editReply({ content: `❌ Użytkownik **${username}** nie istnieje.` });
-                }
-
-                await sql`DELETE FROM users WHERE LOWER(username) = LOWER(${username})`;
-                console.log(`[USER DELETED] ${username} | By: ${interaction.user.tag}`);
-
-                await interaction.editReply({ embeds: [
-                    new EmbedBuilder()
-                        .setTitle('🗑️ Użytkownik Usunięty')
-                        .setColor(0xFF4444)
-                        .addFields(
-                            { name: '👤 Usunięty', value: username, inline: true },
-                            { name: '👮 Przez', value: interaction.user.tag, inline: true }
-                        )
-                        .setFooter({ text: 'Arcane Auth System' })
-                        .setTimestamp()
-                ]});
+                const user = sql.prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)').get(username) as any;
+                if (!user) return interaction.editReply({ content: `❌ Użytkownik **${username}** nie istnieje.` });
+                sql.prepare('DELETE FROM users WHERE id = ?').run(user.id);
+                console.log(`[USER DELETED] User: ${username} | By: ${interaction.user.tag}`);
+                await interaction.editReply({ embeds: [new EmbedBuilder().setTitle('🗑️ Użytkownik Usunięty').setColor(0xFF4444).addFields({ name: '👤 Usunięty użytkownik', value: username, inline: true }, { name: '👮 Przez', value: interaction.user.tag, inline: true }).setFooter({ text: 'Arcane Auth System' }).setTimestamp()]});
             }
 
-            // ── /extendkey ────────────────────────────────────────────
+            // ── /extendkey ──
             else if (cmd === 'extendkey') {
-                if (!sql) return interaction.editReply({ content: '❌ Brak połączenia z bazą.' });
                 const username = interaction.options.getString('username');
                 const days = interaction.options.getInteger('days');
-                const users = await sql`SELECT * FROM users WHERE LOWER(username) = LOWER(${username})`;
-
-                if (users.length === 0) {
-                    return interaction.editReply({ content: `❌ Użytkownik **${username}** nie istnieje.` });
-                }
-
-                const user = users[0];
-                if (user.lifetime) {
-                    return interaction.editReply({ content: `ℹ️ Użytkownik **${username}** ma LIFETIME — nie można przedłużyć.` });
-                }
-
-                const now = new Date();
-                const currentExpiry = user.sub_expires_at ? new Date(user.sub_expires_at) : now;
-                const base = currentExpiry > now ? currentExpiry : now;
-                const newExpiry = new Date(base.getTime() + days * 24 * 60 * 60 * 1000);
-
-                await sql`UPDATE users SET sub_expires_at = ${newExpiry} WHERE LOWER(username) = LOWER(${username})`;
-                console.log(`[SUB EXTENDED] ${username} | +${days}d | New: ${newExpiry.toISOString()} | By: ${interaction.user.tag}`);
-
-                await interaction.editReply({ embeds: [
-                    new EmbedBuilder()
-                        .setTitle('⏳ Subskrypcja Przedłużona')
-                        .setColor(0x00CC66)
-                        .addFields(
-                            { name: '👤 Użytkownik', value: username, inline: true },
-                            { name: '➕ Dodano dni', value: `${days} dni`, inline: true },
-                            { name: '📅 Nowe wygaśnięcie', value: formatDate(newExpiry), inline: false }
-                        )
-                        .setFooter({ text: `Przedłużono przez ${interaction.user.tag}` })
-                        .setTimestamp()
-                ]});
+                const user = sql.prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)').get(username) as any;
+                if (!user) return interaction.editReply({ content: `❌ Użytkownik **${username}** nie istnieje.` });
+                if (user.lifetime) return interaction.editReply({ content: `ℹ️ Użytkownik **${username}** ma już LIFETIME — nie można przedłużyć.` });
+                const base = (user.subExpiresAt && new Date(user.subExpiresAt) > now) ? new Date(user.subExpiresAt) : now;
+                const newExpiry = new Date(base.getTime() + (days || 30) * 24 * 60 * 60 * 1000);
+                sql.prepare('UPDATE users SET subExpiresAt = ? WHERE id = ?').run(newExpiry.toISOString(), user.id);
+                console.log(`[SUB EXTENDED] User: ${username} | +${days} days | New expiry: ${newExpiry.toISOString()} | By: ${interaction.user.tag}`);
+                await interaction.editReply({ embeds: [new EmbedBuilder().setTitle('⏳ Subskrypcja Przedłużona').setColor(0x00CC66).addFields({ name: '👤 Użytkownik', value: username, inline: true }, { name: '➕ Dodano dni', value: `${days} dni`, inline: true }, { name: '📅 Nowe wygaśnięcie', value: formatDate(newExpiry.toISOString()), inline: false }).setFooter({ text: `Przedłużono przez ${interaction.user.tag}` }).setTimestamp()]});
             }
 
-            // ── /listkeys ─────────────────────────────────────────────
+            // ── /listkeys ──
             else if (cmd === 'listkeys') {
-                if (!sql) return interaction.editReply({ content: '❌ Brak połączenia z bazą.' });
                 const filter = interaction.options.getString('filter') || 'all';
-
-                let keys;
-                if (filter === 'unused') keys = await sql`SELECT * FROM keys WHERE used = FALSE ORDER BY created_at DESC LIMIT 15`;
-                else if (filter === 'used') keys = await sql`SELECT * FROM keys WHERE used = TRUE ORDER BY created_at DESC LIMIT 15`;
-                else keys = await sql`SELECT * FROM keys ORDER BY created_at DESC LIMIT 15`;
-
-                const totalResult = await sql`SELECT COUNT(*) as count FROM keys`;
-                const total = totalResult[0].count;
-
-                const lines = keys.map((k: any) => {
-                    const status = k.used ? `✅ ${k.used_by}` : '⬜ Nieużyty';
-                    const duration = k.duration_days === 0 ? '♾️ LT' : `${k.duration_days}d`;
-                    return `\`${k.code}\` • ${duration} • ${status}`;
-                });
-
-                await interaction.editReply({ embeds: [
-                    new EmbedBuilder()
-                        .setTitle(`📜 Klucze licencji (${filter})`)
-                        .setColor(0x7B68EE)
-                        .setDescription(lines.length > 0 ? lines.join('\n') : 'Brak kluczy.')
-                        .setFooter({ text: `Pokazuję max 15 najnowszych | Łącznie: ${total}` })
-                        .setTimestamp()
-                ]});
+                let keys: any[];
+                if (filter === 'unused') keys = sql.prepare('SELECT * FROM keys WHERE used = 0 ORDER BY id DESC LIMIT 15').all();
+                else if (filter === 'used') keys = sql.prepare('SELECT * FROM keys WHERE used = 1 ORDER BY id DESC LIMIT 15').all();
+                else keys = sql.prepare('SELECT * FROM keys ORDER BY id DESC LIMIT 15').all();
+                const lines = keys.map(k => `\`${k.code}\` • ${k.durationDays === 0 ? '♾️ LT' : `${k.durationDays}d`} • ${k.used ? '✅ ' + k.usedBy : '⬜ Nieużyty'}`);
+                const allKeys = (sql.prepare('SELECT COUNT(*) as count FROM keys').get() as any).count;
+                await interaction.editReply({ embeds: [new EmbedBuilder().setTitle(`📜 Klucze licencji (${filter}) — ${keys.length} szt.`).setColor(0x7B68EE).setDescription(lines.length > 0 ? lines.join('\n') : 'Brak kluczy.').setFooter({ text: `Pokazuję max 15 najnowszych | Łącznie: ${allKeys}` }).setTimestamp()]});
             }
 
-            // ── /logs ─────────────────────────────────────────────────
+            // ── /logs ──
             else if (cmd === 'logs') {
-                if (!sql) return interaction.editReply({ content: '❌ Brak połączenia z bazą.' });
-                try {
-                    const logs = await sql`SELECT * FROM activation_logs ORDER BY activated_at DESC LIMIT 10`;
-                    const totalResult = await sql`SELECT COUNT(*) as count FROM activation_logs`;
-                    const total = totalResult[0]?.count || 0;
-
-                    const lines = logs.map((l: any, i: number) =>
-                        `**${i+1}.** \`${l.username || 'Brak'}\` • \`${l.ip || 'Brak'}\` • HWID: \`${(l.hwid || 'N/A').substring(0,12)}...\` • ${formatDate(l.activated_at)}`
-                    );
-
-                    await interaction.editReply({ embeds: [
-                        new EmbedBuilder()
-                            .setTitle('📊 Ostatnie aktywacje licencji')
-                            .setColor(0x2898FA)
-                            .setDescription(lines.length > 0 ? lines.join('\n') : 'Brak logów aktywacji w bazie.')
-                            .setFooter({ text: `Łącznie aktywacji: ${total}` })
-                            .setTimestamp()
-                    ]});
-                } catch (dbErr) {
-                    console.error('[DISCORD BOT ERROR /logs]:', dbErr);
-                    await interaction.editReply({ content: '❌ Wystąpił błąd bazy danych podczas pobierania logów. (Sprawdź czy tabela activation_logs istnieje)' });
-                }
+                const logs = sql.prepare('SELECT * FROM activation_logs ORDER BY id DESC LIMIT 10').all() as any[];
+                const lines = logs.map((l, i) => `**${i+1}.** \`${l.username}\` • \`${l.ip}\` • HWID: \`${(l.hwid || 'N/A').substring(0,12)}...\` • ${formatDate(l.activatedAt)}`);
+                const total = (sql.prepare('SELECT COUNT(*) as count FROM activation_logs').get() as any).count;
+                await interaction.editReply({ embeds: [new EmbedBuilder().setTitle('📊 Ostatnie aktywacje licencji').setColor(0x2898FA).setDescription(lines.length > 0 ? lines.join('\n') : 'Brak logów.').setFooter({ text: `Łącznie aktywacji: ${total}` }).setTimestamp()]});
             }
 
-            // ── /stats ────────────────────────────────────────────────
+            // ── /stats ──
             else if (cmd === 'stats') {
-                if (!sql) return interaction.editReply({ content: '❌ Brak połączenia z bazą.' });
-
-                const totalUsers = (await sql`SELECT COUNT(*) as count FROM users`)[0].count;
-                const lifetimeUsers = (await sql`SELECT COUNT(*) as count FROM users WHERE lifetime = TRUE`)[0].count;
-                const activeUsers = (await sql`SELECT COUNT(*) as count FROM users WHERE lifetime = TRUE OR sub_expires_at > NOW()`)[0].count;
-                const expiredUsers = (await sql`SELECT COUNT(*) as count FROM users WHERE lifetime = FALSE AND (sub_expires_at IS NULL OR sub_expires_at <= NOW())`)[0].count;
-                const totalKeys = (await sql`SELECT COUNT(*) as count FROM keys`)[0].count;
-                const unusedKeys = (await sql`SELECT COUNT(*) as count FROM keys WHERE used = FALSE`)[0].count;
-                const totalActivations = (await sql`SELECT COUNT(*) as count FROM activation_logs`)[0].count;
-
-                await interaction.editReply({ embeds: [
-                    new EmbedBuilder()
-                        .setTitle('📈 Arcane Auth — Statystyki')
-                        .setColor(0xFFD700)
-                        .addFields(
-                            { name: '👥 Użytkownicy', value: `${totalUsers}`, inline: true },
-                            { name: '🟢 Aktywni', value: `${activeUsers}`, inline: true },
-                            { name: '🔴 Wygasłe', value: `${expiredUsers}`, inline: true },
-                            { name: '♾️ Lifetime', value: `${lifetimeUsers}`, inline: true },
-                            { name: '🔑 Klucze ogółem', value: `${totalKeys}`, inline: true },
-                            { name: '⬜ Nieużyte klucze', value: `${unusedKeys}`, inline: true },
-                            { name: '📊 Aktywacje ogółem', value: `${totalActivations}`, inline: true }
-                        )
-                        .setFooter({ text: 'Arcane Auth System' })
-                        .setTimestamp()
-                ]});
+                const totalUsers = (sql.prepare('SELECT COUNT(*) as count FROM users').get() as any).count;
+                const lifetimeUsers = (sql.prepare('SELECT COUNT(*) as count FROM users WHERE lifetime = 1').get() as any).count;
+                const activeUsers = (sql.prepare('SELECT COUNT(*) as count FROM users WHERE lifetime = 1 OR (subExpiresAt IS NOT NULL AND subExpiresAt > ?)').get(now.toISOString()) as any).count;
+                const expiredUsers = totalUsers - activeUsers;
+                const totalKeys = (sql.prepare('SELECT COUNT(*) as count FROM keys').get() as any).count;
+                const unusedKeys = (sql.prepare('SELECT COUNT(*) as count FROM keys WHERE used = 0').get() as any).count;
+                const totalActivations = (sql.prepare('SELECT COUNT(*) as count FROM activation_logs').get() as any).count;
+                await interaction.editReply({ embeds: [new EmbedBuilder().setTitle('📈 Arcane Auth — Statystyki').setColor(0xFFD700).addFields({ name: '👥 Użytkownicy', value: `${totalUsers}`, inline: true }, { name: '🟢 Aktywni', value: `${activeUsers}`, inline: true }, { name: '🔴 Wygasłe', value: `${expiredUsers}`, inline: true }, { name: '♾️ Lifetime', value: `${lifetimeUsers}`, inline: true }, { name: '🔑 Klucze ogółem', value: `${totalKeys}`, inline: true }, { name: '⬜ Nieużyte klucze', value: `${unusedKeys}`, inline: true }, { name: '📊 Aktywacje ogółem', value: `${totalActivations}`, inline: true }).setFooter({ text: 'Arcane Auth System' }).setTimestamp()]});
             }
 
-        } catch (err) {
+            // ── /launchers ──
+            else if (cmd === 'launchers') {
+                const launchers = sql.prepare('SELECT * FROM launchers').all() as any[];
+                if (launchers.length === 0) return interaction.editReply({ content: 'ℹ️ **Brak skompilowanych launcherów w bazie.** Użyj `/addlauncher` lub uruchom launcher aby go zarejestrować.' });
+
+                const embed = new EmbedBuilder().setTitle('🚀 Skompilowane Launchery Arcane').setColor(0x7B68EE).setFooter({ text: 'Arcane Auth System • Zdalny Self-Destruct' }).setTimestamp();
+                const row = new ActionRowBuilder();
+                for (const l of launchers) {
+                    const statusText = l.status === 'destructed' ? '💣 **ZDESTRUOWANY**' : '🟢 **AKTYWNY**';
+                    const connectedPcCount = l.downloadCount || (JSON.parse(l.activeSessions || '[]')).length || 0;
+                    embed.addFields({ name: `📦 ${l.name} (\`${l.buildId}\`)`, value: `Status: ${statusText}\n💻 Pobrane / Aktywne komputery: **${connectedPcCount}**\n📅 Data: ${formatDate(l.compiledAt)}`, inline: false });
+                    if (l.status !== 'destructed' && row.components.length < 5) row.addComponents(new ButtonBuilder().setCustomId(`destruct_build_${l.buildId}`).setLabel(`💣 Destruct ${l.buildId}`).setStyle(ButtonStyle.Danger));
+                }
+                const replyPayload: any = { embeds: [embed] };
+                if (row.components.length > 0) replyPayload.components = [row];
+                await interaction.editReply(replyPayload);
+            }
+
+            // ── /destructlauncher ──
+            else if (cmd === 'destructlauncher') {
+                const buildId = interaction.options.getString('buildid');
+                const launcher = sql.prepare('SELECT * FROM launchers WHERE LOWER(buildId) = LOWER(?)').get(buildId) as any;
+                if (!launcher) return interaction.editReply({ content: `❌ Nie znaleziono launchera o ID \`${buildId}\`.` });
+                sql.prepare('UPDATE launchers SET status = ? WHERE buildId = ?').run('destructed', buildId);
+                console.log(`[LAUNCHER DESTRUCTED] Build: ${buildId} | By: ${interaction.user.tag}`);
+                await interaction.editReply({ embeds: [new EmbedBuilder().setTitle('💣 LAUNCHER ZDESTRUOWANY').setColor(0xFF0000).addFields({ name: '📦 Build ID', value: `\`${buildId}\``, inline: true }, { name: '👤 Przez', value: interaction.user.tag, inline: true }, { name: '⚠️ Wynik', value: 'Wszystkie połączone i pobrane launchery na komputerach graczy zostaną automatycznie usunięte i zdestruowane!', inline: false }).setFooter({ text: 'Arcane Remote Destruct Protocol' }).setTimestamp()]});
+            }
+
+            // ── /addlauncher ──
+            else if (cmd === 'addlauncher') {
+                const buildId = interaction.options.getString('buildid');
+                const name = interaction.options.getString('name') || `Arcane Launcher ${buildId}`;
+                let launcher = sql.prepare('SELECT * FROM launchers WHERE LOWER(buildId) = LOWER(?)').get(buildId) as any;
+                if (launcher) {
+                    sql.prepare('UPDATE launchers SET name = ?, status = ? WHERE buildId = ?').run(name, 'active', buildId);
+                } else {
+                    sql.prepare('INSERT INTO launchers (buildId, name, compiledAt, status, downloadCount, activeSessions) VALUES (?, ?, ?, ?, ?, ?)').run(buildId, name, new Date().toISOString(), 'active', 0, '[]');
+                }
+                console.log(`[LAUNCHER REGISTERED] Build: ${buildId} | Name: ${name} | By: ${interaction.user.tag}`);
+                await interaction.editReply({ embeds: [new EmbedBuilder().setTitle('✅ Launcher Zarejestrowany').setColor(0x00FF7F).addFields({ name: '📦 Build ID', value: `\`${buildId}\``, inline: true }, { name: '📝 Nazwa', value: name, inline: true }, { name: '🟢 Status', value: 'AKTYWNY', inline: true }).setFooter({ text: 'Arcane Launcher Management' }).setTimestamp()]});
+            }
+
+            // ── /users ──
+            else if (cmd === 'users') {
+                const users = sql.prepare('SELECT * FROM users ORDER BY id ASC').all() as any[];
+                const logs = sql.prepare('SELECT * FROM activation_logs').all() as any[];
+                if (users.length === 0) return interaction.editReply({ content: 'ℹ️ **Brak użytkowników w bazie danych.**' });
+
+                const embeds: any[] = [];
+                let currentEmbed = new EmbedBuilder().setTitle(`👥 Pełna Lista Użytkowników Arcane (${users.length})`).setColor(0x2898FA).setFooter({ text: 'Arcane Auth System • Pełne Dane Bazy' }).setTimestamp();
+                let fieldCount = 0;
+
+                for (const u of users) {
+                    if (fieldCount >= 10) {
+                        embeds.push(currentEmbed);
+                        if (embeds.length >= 5) break;
+                        currentEmbed = new EmbedBuilder().setTitle(`👥 Pełna Lista Użytkowników (cd.)`).setColor(0x2898FA).setFooter({ text: 'Arcane Auth System' }).setTimestamp();
+                        fieldCount = 0;
+                    }
+
+                    const isLt = u.lifetime;
+                    const expiry = u.subExpiresAt;
+                    const statusText = isLt ? '♾️ LT' : (!expiry || now > new Date(expiry) ? '🔴 WYGASŁA' : `🟢 AKTYWNA (${Math.floor((new Date(expiry).getTime() - now.getTime()) / (1000 * 60 * 60 * 24))}d)`);
+                    const actLog = logs.find(l => l.username && l.username.toLowerCase() === u.username.toLowerCase());
+                    const ipText = actLog?.ip || 'Brak IP';
+                    const hwidText = u.hwid ? `\`${u.hwid.substring(0, 14)}...\`` : '`Brak HWID`';
+
+                    currentEmbed.addFields({ 
+                        name: `#${u.id} 👤 ${u.username}`, 
+                        value: `Status: ${statusText} | IP: \`${ipText}\` | HWID: ${hwidText}\nWygaśnięcie: ${isLt ? '`♾️ LIFETIME`' : `\`${formatDate(expiry)}\``}`, 
+                        inline: false 
+                    });
+                    fieldCount++;
+                }
+                if (fieldCount > 0 && embeds.length < 5) {
+                    embeds.push(currentEmbed);
+                }
+                await interaction.editReply({ embeds });
+            }
+
+        } catch (err: any) {
             console.error(`[DISCORD BOT] Error in /${cmd}:`, err);
-            await interaction.editReply({ content: '❌ Wystąpił błąd. Spróbuj ponownie.' });
+            if (err?.code === 40060 || err?.code === 10062) return;
+            const errContent = `❌ Wystąpił błąd podczas wykonywania komendy /${cmd}: ${err?.message || err}`;
+            if (interaction.deferred || interaction.replied) {
+                await interaction.editReply({ content: errContent }).catch(() => {});
+            } else {
+                await interaction.reply({ content: errContent, flags: MessageFlags.Ephemeral }).catch(() => {});
+            }
         }
     });
 
     client.on('error', (err: any) => console.error('[DISCORD BOT] Client error:', err));
     client.login(DISCORD_BOT_TOKEN).catch((err: any) => console.error('[DISCORD BOT] Login failed:', err));
 }
+
+// -------------------------------------------------------------------
+// ElysiaJS App
+// -------------------------------------------------------------------
+const app = new Elysia()
+    .use(cors())
+
+    .onRequest(({ set }) => {
+        set.headers['X-Content-Type-Options'] = 'nosniff';
+        set.headers['X-Frame-Options'] = 'DENY';
+        set.headers['X-XSS-Protection'] = '1; mode=block';
+    })
+
+    .get('/', () => ({
+        status: 'online',
+        server: 'Arcane Auth Backend (SQLite)',
+        database: 'SQLite (arcane.db)'
+    }))
+
+    .get('/api/health', () => {
+        try {
+            const keyCount = (sql.prepare('SELECT COUNT(*) as count FROM keys').get() as any).count;
+            const userCount = (sql.prepare('SELECT COUNT(*) as count FROM users').get() as any).count;
+            return { status: 'ok', db: 'sqlite', keys: keyCount, users: userCount };
+        } catch (err: any) {
+            return { status: 'error', message: err?.message };
+        }
+    })
+
+    .post('/api/generatekey', ({ body }: { body: { days?: number } }) => {
+        const durationDays = parseInt(String(body?.days ?? 30));
+        const isLifetime = durationDays === 0;
+        const newKey = generateRandomKey();
+
+        sql.prepare('INSERT INTO keys (code, durationDays, used, createdAt) VALUES (?, ?, 0, ?)').run(newKey, durationDays, new Date().toISOString());
+
+        console.log(`[KEY CREATED] ${newKey} | ${isLifetime ? 'LIFETIME' : durationDays + 'd'}`);
+        return { success: true, key: newKey, days: durationDays, lifetime: isLifetime };
+    })
+
+    .post('/api/register', async ({ body }: { body: { username?: string; password?: string; key?: string; hwid?: string } }) => {
+        const username = body?.username?.trim();
+        const password = body?.password;
+        const key = body?.key?.trim();
+        const hwid = body?.hwid?.trim();
+
+        if (!username || !password || !key) {
+            return { success: false, message: "Username, password, and license key are required!" };
+        }
+
+        const existingUser = sql.prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)').get(username);
+        if (existingUser) {
+            return { success: false, message: "Username is already taken!" };
+        }
+
+        const targetKey = sql.prepare('SELECT * FROM keys WHERE code = ? AND used = 0').get(key) as any;
+        if (!targetKey) {
+            return { success: false, message: "Invalid or already used license key!" };
+        }
+
+        sql.prepare('UPDATE keys SET used = 1, usedBy = ?, usedAt = ? WHERE code = ?').run(username, new Date().toISOString(), key);
+
+        const now = new Date();
+        const isLifetime = targetKey.durationDays === 0;
+        const expiresAt = isLifetime ? null : new Date(now.getTime() + targetKey.durationDays * 24 * 60 * 60 * 1000);
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        sql.prepare('INSERT INTO users (username, password, hwid, subExpiresAt, lifetime, registeredAt) VALUES (?, ?, ?, ?, ?, ?)').run(username, hashedPassword, hwid || '', isLifetime ? null : expiresAt?.toISOString(), isLifetime ? 1 : 0, now.toISOString());
+        sql.prepare('INSERT INTO activation_logs (event, username, key, ip, hwid, lifetime, expiresAt, activatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run('LICENSE_ACTIVATED', username, key, 'API', hwid || 'Not provided', isLifetime ? 1 : 0, isLifetime ? 'LIFETIME' : expiresAt?.toISOString(), now.toISOString());
+
+        return { success: true, message: "Account registered successfully!", expiresAt: isLifetime ? null : expiresAt?.toISOString(), lifetime: isLifetime };
+    })
+
+    .get('/api/logs', () => {
+        const logs = sql.prepare('SELECT * FROM activation_logs ORDER BY id DESC LIMIT 50').all();
+        return { success: true, total: logs.length, logs };
+    })
+
+    .post('/api/login', async ({ body }: { body: { username?: string; password?: string; hwid?: string } }) => {
+        const username = body?.username?.trim();
+        const password = body?.password;
+        const hwid = body?.hwid?.trim();
+
+        if (!username || !password) {
+            return { success: false, message: "Username and password are required!" };
+        }
+
+        const user = sql.prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)').get(username) as any;
+        if (!user) {
+            return { success: false, message: "User not found!" };
+        }
+
+        const passwordValid = await bcrypt.compare(password, user.password);
+        if (!passwordValid) {
+            return { success: false, message: "Invalid password!" };
+        }
+
+        if (user.hwid && hwid && user.hwid !== hwid) {
+            return { success: false, message: "HWID mismatch! PC not authorized." };
+        }
+
+        if (!user.hwid && hwid) {
+            sql.prepare('UPDATE users SET hwid = ? WHERE id = ?').run(hwid, user.id);
+        }
+
+        const now = new Date();
+        if (user.lifetime) {
+            return { success: true, message: "Login successful!", username: user.username, expiresAt: null, lifetime: true, daysLeft: -1, hoursLeft: -1 };
+        }
+
+        if (!user.subExpiresAt || now > new Date(user.subExpiresAt)) {
+            return { success: false, message: "Subscription EXPIRED! Buy new license.", expired: true };
+        }
+
+        const subDate = new Date(user.subExpiresAt);
+        const diffMs = subDate.getTime() - now.getTime();
+        const daysLeft = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+        const hoursLeft = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+
+        return { success: true, message: "Login successful!", username: user.username, expiresAt: user.subExpiresAt, lifetime: false, daysLeft, hoursLeft };
+    })
+
+    .listen(PORT);
+
+console.log(`[SERVER] ElysiaJS + SQLite Server running on port ${PORT}`);
